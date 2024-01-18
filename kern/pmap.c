@@ -102,9 +102,7 @@ boot_alloc(uint32_t n)
 	// to a multiple of PGSIZE.
 	//
 	// LAB 2: Your code here.
-    if(n < 0) {
-        panic("boot_alloc: n < 0");
-    }else if(n == 0) {
+    if(n == 0) {
         return nextfree;
     }else if(n > 0) {
         result = nextfree;
@@ -276,15 +274,8 @@ page_init(void)
         pages[i].pp_link = NULL;
     }
 
-    extern char end[];
-    for(int i = EXTPHYSMEM / PGSIZE; i < PADDR(end) / PGSIZE; i++) {
-        pages[i].pp_ref = 0;
-        pages[i].pp_link = page_free_list;
-        page_free_list = &pages[i];
-    }
-
     int boot_alloc_end = PADDR(boot_alloc(0)) / PGSIZE;
-    for(int i = PADDR(end) / PGSIZE; i < boot_alloc_end; i++) {
+    for(int i = EXTPHYSMEM / PGSIZE; i < boot_alloc_end; i++) {
         pages[i].pp_ref = 1;
         pages[i].pp_link = NULL;
     }
@@ -322,7 +313,7 @@ page_alloc(int alloc_flags)
     if(alloc_flags & ALLOC_ZERO) {
         memset(page2kva(free_page), 0, PGSIZE);
     }
-	return 0;
+	return free_page;
 }
 
 //
@@ -494,6 +485,8 @@ tlb_invalidate(pde_t *pgdir, void *va)
 static void
 check_page_free_list(bool only_low_memory)
 {
+    cprintf("check_page_free_list() starts\n");
+
 	struct PageInfo *pp;
 	unsigned pdx_limit = only_low_memory ? 1 : NPDENTRIES;
 	int nfree_basemem = 0, nfree_extmem = 0;
@@ -515,6 +508,7 @@ check_page_free_list(bool only_low_memory)
 		*tp[1] = 0;
 		*tp[0] = pp2;
 		page_free_list = pp1;
+        cprintf("pages with lower addresses are moved to first in the free list\n");
 	}
 
 	// if there's a page that shouldn't be on the free list,

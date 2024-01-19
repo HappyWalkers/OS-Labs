@@ -371,7 +371,20 @@ pte_t *
 pgdir_walk(pde_t *pgdir, const void *va, int create)
 {
 	// Fill this function in
-	return NULL;
+    pde_t* pde = &pgdir[PDX(va)];
+    if(!(*pde & PTE_P)) {
+        if(!create) {
+            return NULL;
+        }
+        struct PageInfo* new_page = page_alloc(ALLOC_ZERO);
+        if(new_page == NULL) {
+            return NULL;
+        }
+        new_page->pp_ref++;
+        *pde = page2pa(new_page) | PTE_P | PTE_W | PTE_U;
+    }
+    pte_t* pte = (pte_t *) KADDR(PTE_ADDR(*pde));
+    return &pte[PTX(va)];
 }
 
 //
@@ -389,6 +402,12 @@ static void
 boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
 {
 	// Fill this function in
+    for(int i = 0; i < size; i += PGSIZE) {
+        pte_t* pte = pgdir_walk(pgdir, (void *) va, 1);
+        *pte = pa | perm | PTE_P;
+        va += PGSIZE;
+        pa += PGSIZE;
+    }
 }
 
 //
@@ -420,7 +439,16 @@ int
 page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 {
 	// Fill this function in
-	return 0;
+    pte_t* pte = pgdir_walk(pgdir, va, 1);
+    if(pte == NULL) {
+        return -E_NO_MEM;
+    }
+    pp->pp_ref++;
+    if(*pte & PTE_P) {
+        page_remove(pgdir, va);
+    }
+    *pte = page2pa(pp) | perm | PTE_P;
+    return 0;
 }
 
 //
@@ -438,7 +466,14 @@ struct PageInfo *
 page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
 {
 	// Fill this function in
-	return NULL;
+    pte_t* pte = pgdir_walk(pgdir, va, 0);
+    if(pte == NULL) {
+        return NULL;
+    }
+    if(pte_store != NULL) {
+        *pte_store = pte;
+    }
+    return pa2page(PTE_ADDR(*pte));
 }
 
 //
@@ -460,6 +495,15 @@ void
 page_remove(pde_t *pgdir, void *va)
 {
 	// Fill this function in
+    pte_t* pte;
+    struct PageInfo* page = page_lookup(pgdir, va, &pte);
+    if(page == NULL) {
+        return;
+    }
+    page_decref(page);
+    *pte = 0;
+    tlb_invalidate(pgdir, va);
+    return;
 }
 
 //
@@ -485,8 +529,6 @@ tlb_invalidate(pde_t *pgdir, void *va)
 static void
 check_page_free_list(bool only_low_memory)
 {
-    cprintf("check_page_free_list() starts\n");
-
 	struct PageInfo *pp;
 	unsigned pdx_limit = only_low_memory ? 1 : NPDENTRIES;
 	int nfree_basemem = 0, nfree_extmem = 0;
@@ -508,7 +550,6 @@ check_page_free_list(bool only_low_memory)
 		*tp[1] = 0;
 		*tp[0] = pp2;
 		page_free_list = pp1;
-        cprintf("pages with lower addresses are moved to first in the free list\n");
 	}
 
 	// if there's a page that shouldn't be on the free list,

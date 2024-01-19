@@ -103,6 +103,13 @@ boot_alloc(uint32_t n)
 	// to a multiple of PGSIZE.
 	//
 	// LAB 2: Your code here.
+    if(n == 0) {
+        return nextfree;
+    }else if(n > 0) {
+        result = nextfree;
+        nextfree += ROUNDUP(n, PGSIZE);
+        return result;
+    }
 
 	return NULL;
 }
@@ -125,8 +132,8 @@ mem_init(void)
 	// Find out how much memory the machine has (npages & npages_basemem).
 	i386_detect_memory();
 
-	// Remove this line when you're ready to test this function.
-	panic("mem_init: This function is not finished\n");
+//	// Remove this line when you're ready to test this function.
+//	panic("mem_init: This function is not finished\n");
 
 	//////////////////////////////////////////////////////////////////////
 	// create initial page directory.
@@ -149,6 +156,8 @@ mem_init(void)
 	// array.  'npages' is the number of physical pages in memory.  Use memset
 	// to initialize all fields of each struct PageInfo to 0.
 	// Your code goes here:
+    pages = (struct PageInfo *) boot_alloc(npages * sizeof(struct PageInfo));
+    memset(pages, 0, npages * sizeof(struct PageInfo));
 
 
 	//////////////////////////////////////////////////////////////////////
@@ -177,6 +186,7 @@ mem_init(void)
 	//      (ie. perm = PTE_U | PTE_P)
 	//    - pages itself -- kernel RW, user NONE
 	// Your code goes here:
+    boot_map_region(kern_pgdir, UPAGES, ROUNDUP(npages * sizeof(struct PageInfo), PGSIZE), PADDR(pages), PTE_U | PTE_P);
 
 	//////////////////////////////////////////////////////////////////////
 	// Map the 'envs' array read-only by the user at linear address UENVS
@@ -197,6 +207,8 @@ mem_init(void)
 	//       overwrite memory.  Known as a "guard page".
 	//     Permissions: kernel RW, user NONE
 	// Your code goes here:
+    boot_map_region(kern_pgdir, KSTACKTOP - KSTKSIZE, KSTKSIZE, PADDR(bootstack), PTE_W | PTE_P);
+//    boot_map_region(kern_pgdir, KSTACKTOP - PTSIZE, PTSIZE - KSTKSIZE, 0, PTE_W | PTE_P);
 
 	//////////////////////////////////////////////////////////////////////
 	// Map all of physical memory at KERNBASE.
@@ -206,6 +218,7 @@ mem_init(void)
 	// we just set up the mapping anyway.
 	// Permissions: kernel RW, user NONE
 	// Your code goes here:
+    boot_map_region(kern_pgdir, KERNBASE, 0xffffffff - KERNBASE, 0, PTE_W | PTE_P);
 
 	// Check that the initial page directory has been set up correctly.
 	check_kern_pgdir();
@@ -264,12 +277,31 @@ page_init(void)
 	// Change the code to reflect this.
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
-	size_t i;
-	for (i = 0; i < npages; i++) {
-		pages[i].pp_ref = 0;
-		pages[i].pp_link = page_free_list;
-		page_free_list = &pages[i];
-	}
+    pages[0].pp_ref = 1;
+    pages[0].pp_link = NULL;
+
+    for(int i = 1; i < npages_basemem; i++) {
+        pages[i].pp_ref = 0;
+        pages[i].pp_link = page_free_list;
+        page_free_list = &pages[i];
+    }
+
+    for(int i = IOPHYSMEM / PGSIZE; i < EXTPHYSMEM / PGSIZE; i++) {
+        pages[i].pp_ref = 1;
+        pages[i].pp_link = NULL;
+    }
+
+    int boot_alloc_end = PADDR(boot_alloc(0)) / PGSIZE;
+    for(int i = EXTPHYSMEM / PGSIZE; i < boot_alloc_end; i++) {
+        pages[i].pp_ref = 1;
+        pages[i].pp_link = NULL;
+    }
+
+    for(int i = boot_alloc_end; i < npages; i++) {
+        pages[i].pp_ref = 0;
+        pages[i].pp_link = page_free_list;
+        page_free_list = &pages[i];
+    }
 }
 
 //
@@ -288,7 +320,17 @@ struct PageInfo *
 page_alloc(int alloc_flags)
 {
 	// Fill this function in
-	return 0;
+    struct PageInfo* free_page = page_free_list;
+    if(free_page == NULL) {
+        return NULL;
+    }
+    page_free_list = free_page->pp_link;
+    free_page->pp_link = NULL;
+
+    if(alloc_flags & ALLOC_ZERO) {
+        memset(page2kva(free_page), 0, PGSIZE);
+    }
+	return free_page;
 }
 
 //
@@ -301,6 +343,12 @@ page_free(struct PageInfo *pp)
 	// Fill this function in
 	// Hint: You may want to panic if pp->pp_ref is nonzero or
 	// pp->pp_link is not NULL.
+    if(pp->pp_ref != 0 || pp->pp_link != NULL) {
+        panic("page_free: pp->pp_ref != 0 || pp->pp_link != NULL");
+    }
+
+    pp->pp_link = page_free_list;
+    page_free_list = pp;
 }
 
 //
@@ -340,7 +388,20 @@ pte_t *
 pgdir_walk(pde_t *pgdir, const void *va, int create)
 {
 	// Fill this function in
-	return NULL;
+    pde_t* pde = &pgdir[PDX(va)];
+    if(!(*pde & PTE_P)) {
+        if(!create) {
+            return NULL;
+        }
+        struct PageInfo* new_page = page_alloc(ALLOC_ZERO);
+        if(new_page == NULL) {
+            return NULL;
+        }
+        new_page->pp_ref++;
+        *pde = page2pa(new_page) | PTE_P | PTE_W | PTE_U;
+    }
+    pte_t* pte = (pte_t *) KADDR(PTE_ADDR(*pde));
+    return &pte[PTX(va)];
 }
 
 //
@@ -358,6 +419,12 @@ static void
 boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
 {
 	// Fill this function in
+    for(int i = 0; i < size; i += PGSIZE) {
+        pte_t* pte = pgdir_walk(pgdir, (void *) va, 1);
+        *pte = pa | perm | PTE_P;
+        va += PGSIZE;
+        pa += PGSIZE;
+    }
 }
 
 //
@@ -389,7 +456,16 @@ int
 page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 {
 	// Fill this function in
-	return 0;
+    pte_t* pte = pgdir_walk(pgdir, va, 1);
+    if(pte == NULL) {
+        return -E_NO_MEM;
+    }
+    pp->pp_ref++;
+    if(*pte & PTE_P) {
+        page_remove(pgdir, va);
+    }
+    *pte = page2pa(pp) | perm | PTE_P;
+    return 0;
 }
 
 //
@@ -407,7 +483,14 @@ struct PageInfo *
 page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
 {
 	// Fill this function in
-	return NULL;
+    pte_t* pte = pgdir_walk(pgdir, va, 0);
+    if(pte == NULL) {
+        return NULL;
+    }
+    if(pte_store != NULL) {
+        *pte_store = pte;
+    }
+    return pa2page(PTE_ADDR(*pte));
 }
 
 //
@@ -429,6 +512,15 @@ void
 page_remove(pde_t *pgdir, void *va)
 {
 	// Fill this function in
+    pte_t* pte;
+    struct PageInfo* page = page_lookup(pgdir, va, &pte);
+    if(page == NULL) {
+        return;
+    }
+    page_decref(page);
+    *pte = 0;
+    tlb_invalidate(pgdir, va);
+    return;
 }
 
 //

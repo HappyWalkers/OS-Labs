@@ -109,7 +109,7 @@ trap_init(void)
     SETGATE(idt[T_ALIGN], 0, GD_KT, trap_align, 0);
     SETGATE(idt[T_MCHK], 0, GD_KT, trap_mchk, 0);
     SETGATE(idt[T_SIMDERR], 0, GD_KT, trap_simderr, 0);
-    SETGATE(idt[T_SYSCALL], 1, GD_KT, trap_syscall, 3);
+    SETGATE(idt[T_SYSCALL], 0, GD_KT, trap_syscall, 3);
     SETGATE(idt[T_DEFAULT], 0, GD_KT, trap_default, 0);
     SETGATE(idt[IRQ_OFFSET + IRQ_TIMER], 0, GD_KT, irq_timer, 0);
     SETGATE(idt[IRQ_OFFSET + IRQ_KBD], 0, GD_KT, irq_kbd, 0);
@@ -202,6 +202,14 @@ trap_dispatch(struct Trapframe *tf)
             break;
         case T_PGFLT:
             page_fault_handler(tf);
+            break;
+        case T_SYSCALL:
+            tf->tf_regs.reg_eax = syscall(tf->tf_regs.reg_eax,
+                    tf->tf_regs.reg_edx,
+                    tf->tf_regs.reg_ecx,
+                    tf->tf_regs.reg_ebx,
+                    tf->tf_regs.reg_edi,
+                    tf->tf_regs.reg_esi);
             break;
         default:
             // Unexpected trap: The user process or the kernel has a bug.

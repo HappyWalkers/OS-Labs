@@ -18,6 +18,7 @@
 static void
 sys_cputs(const char *s, size_t len)
 {
+//    cprintf("sys_cputs\n");
 	// Check that the user has permission to read memory [s, s+len).
 	// Destroy the environment if not.
 
@@ -40,6 +41,8 @@ sys_cgetc(void)
 static envid_t
 sys_getenvid(void)
 {
+//    cprintf("sys_getenvid\n");
+//    cprintf("curenv->env_id: %08x\n", curenv->env_id);
 	return curenv->env_id;
 }
 
@@ -275,16 +278,24 @@ syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, 
 
 	switch (syscallno) {
         case SYS_cputs:
+//            cprintf("syscall cputs\n");
             sys_cputs((const char *)a1, (size_t)a2);
             return 0;
         case SYS_cgetc:
+//            cprintf("syscall cgetc\n");
             return sys_cgetc();
         case SYS_getenvid:
+//            cprintf("syscall getenvid\n");
             return sys_getenvid();
         case SYS_env_destroy:
+//            cprintf("syscall env_destroy\n");
             return sys_env_destroy((envid_t)a1);
-	default:
-		return -E_INVAL;
+        case SYS_yield:
+//            cprintf("syscall yield\n");
+            sys_yield();
+            return 0;
+        default:
+            return -E_INVAL;
 	}
 }
 

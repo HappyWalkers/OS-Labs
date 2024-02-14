@@ -228,13 +228,14 @@ trap_dispatch(struct Trapframe *tf)
             page_fault_handler(tf);
             break;
         case T_SYSCALL:
+//            cprintf("syscall: %d %d %d %d %d %d\n", tf->tf_regs.reg_eax, tf->tf_regs.reg_edx, tf->tf_regs.reg_ecx, tf->tf_regs.reg_ebx, tf->tf_regs.reg_edi, tf->tf_regs.reg_esi);
             tf->tf_regs.reg_eax = syscall(tf->tf_regs.reg_eax,
                                           tf->tf_regs.reg_edx,
                                           tf->tf_regs.reg_ecx,
                                           tf->tf_regs.reg_ebx,
                                           tf->tf_regs.reg_edi,
                                           tf->tf_regs.reg_esi);
-            break;
+            return;
         default:
             // Unexpected trap: The user process or the kernel has a bug.
             print_trapframe(tf);
@@ -295,7 +296,7 @@ trap(struct Trapframe *tf)
 		// Acquire the big kernel lock before doing any
 		// serious kernel work.
 		// LAB 4: Your code here.
-        lock_kernel()
+        lock_kernel();
 		assert(curenv);
 
 		// Garbage collect if current enviroment is a zombie

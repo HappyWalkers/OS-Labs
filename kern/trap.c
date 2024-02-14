@@ -220,7 +220,31 @@ trap_dispatch(struct Trapframe *tf)
 {
 	// Handle processor exceptions.
 	// LAB 3: Your code here.
-<<<<<<< HEAD
+    switch (tf->tf_trapno) {
+        case T_BRKPT:
+            monitor(tf);
+            break;
+        case T_PGFLT:
+            page_fault_handler(tf);
+            break;
+        case T_SYSCALL:
+            tf->tf_regs.reg_eax = syscall(tf->tf_regs.reg_eax,
+                                          tf->tf_regs.reg_edx,
+                                          tf->tf_regs.reg_ecx,
+                                          tf->tf_regs.reg_ebx,
+                                          tf->tf_regs.reg_edi,
+                                          tf->tf_regs.reg_esi);
+            break;
+        default:
+            // Unexpected trap: The user process or the kernel has a bug.
+            print_trapframe(tf);
+            if (tf->tf_cs == GD_KT)
+                panic("unhandled trap in kernel");
+            else {
+                env_destroy(curenv);
+                return;
+            }
+    }
 
 	// Handle spurious interrupts
 	// The hardware sometimes raises these because of noise on the
@@ -243,33 +267,6 @@ trap_dispatch(struct Trapframe *tf)
 		env_destroy(curenv);
 		return;
 	}
-=======
-    switch (tf->tf_trapno) {
-        case T_BRKPT:
-            monitor(tf);
-            break;
-        case T_PGFLT:
-            page_fault_handler(tf);
-            break;
-        case T_SYSCALL:
-            tf->tf_regs.reg_eax = syscall(tf->tf_regs.reg_eax,
-                    tf->tf_regs.reg_edx,
-                    tf->tf_regs.reg_ecx,
-                    tf->tf_regs.reg_ebx,
-                    tf->tf_regs.reg_edi,
-                    tf->tf_regs.reg_esi);
-            break;
-        default:
-            // Unexpected trap: The user process or the kernel has a bug.
-            print_trapframe(tf);
-            if (tf->tf_cs == GD_KT)
-                panic("unhandled trap in kernel");
-            else {
-                env_destroy(curenv);
-                return;
-            }
-    }
->>>>>>> lab3
 }
 
 void

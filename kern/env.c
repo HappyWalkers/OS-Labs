@@ -550,7 +550,5 @@ env_run(struct Env *e)
 
     unlock_kernel();
     env_pop_tf(&curenv->env_tf);
-
-	panic("env_run not yet implemented");
 }
 

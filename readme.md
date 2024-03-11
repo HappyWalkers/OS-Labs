@@ -170,6 +170,17 @@ page_alloc(int alloc_flags)
 ```
 
 ### Freeing
+When a physical page is no longer in use, we need to decrement the reference count of the page
+so that the page can be freed when the reference count reaches 0.
+```c
+void
+page_decref(struct PageInfo* pp)
+{
+	if (--pp->pp_ref == 0)
+		page_free(pp);
+}
+
+```
 To free a page, we need to return the page to the free list.
 ```c
 //
@@ -207,6 +218,7 @@ Then the logical address is translated to a physical address using the 2-level p
 The following is a general virtual memory layout of a process in JOS.
 
 ```c
+
 /*
  * Virtual memory map:                                Permissions
  *                                                    kernel/user
@@ -270,9 +282,87 @@ The following is a general virtual memory layout of a process in JOS.
  *     "Empty Memory" is normally unmapped, but user programs may map pages
  *     there if desired.  JOS user programs map pages temporarily at UTEMP.
  */
+
+
+// All physical memory mapped at this address
+#define	KERNBASE	0xF0000000
+
+// At IOPHYSMEM (640K) there is a 384K hole for I/O.  From the kernel,
+// IOPHYSMEM can be addressed at KERNBASE + IOPHYSMEM.  The hole ends
+// at physical address EXTPHYSMEM.
+#define IOPHYSMEM	0x0A0000
+#define EXTPHYSMEM	0x100000
+
+// Kernel stack.
+#define KSTACKTOP	KERNBASE
+#define KSTKSIZE	(8*PGSIZE)   		// size of a kernel stack
+#define KSTKGAP		(8*PGSIZE)   		// size of a kernel stack guard
+
+// Memory-mapped IO.
+#define MMIOLIM		(KSTACKTOP - PTSIZE)
+#define MMIOBASE	(MMIOLIM - PTSIZE)
+
+#define ULIM		(MMIOBASE)
+
+/*
+ * User read-only mappings! Anything below here til UTOP are readonly to user.
+ * They are global pages mapped in at env allocation time.
+ */
+
+// User read-only virtual page table (see 'uvpt' below)
+#define UVPT		(ULIM - PTSIZE)
+// Read-only copies of the Page structures
+#define UPAGES		(UVPT - PTSIZE)
+// Read-only copies of the global env structures
+#define UENVS		(UPAGES - PTSIZE)
+
+/*
+ * Top of user VM. User can manipulate VA from UTOP-1 and down!
+ */
+
+// Top of user-accessible VM
+#define UTOP		UENVS
+// Top of one-page user exception stack
+#define UXSTACKTOP	UTOP
+// Next page left invalid to guard against exception stack overflow; then:
+// Top of normal user stack
+#define USTACKTOP	(UTOP - 2*PGSIZE)
+
+// Where user programs generally begin
+#define UTEXT		(2*PTSIZE)
+
+// Used for temporary page mappings.  Typed 'void*' for convenience
+#define UTEMP		((void*) PTSIZE)
+// Used for temporary page mappings for the user page-fault handler
+// (should not conflict with other temporary page mappings)
+#define PFTEMP		(UTEMP + PTSIZE - PGSIZE)
+// The location of the user-level STABS data structure
+#define USTABDATA	(PTSIZE / 2)
+
+// Physical address of startup code for non-boot CPUs (APs)
+#define MPENTRY_PADDR	0x7000
 ```
 
 ### Initialization
+JOS uses a two-level page table to manage the virtual memory. 
+The initialization of kernel space involves 
+allocating a physical page for the page directory
+and allocating some pages for the kernel.
+
+
+```c
+// Set up a two-level page table:
+//    kern_pgdir is its linear (virtual) address of the root
+//
+// This function only sets up the kernel part of the address space
+// (ie. addresses >= UTOP).  The user part of the address space
+// will be set up later.
+//
+// From UTOP to ULIM, the user is allowed to read but not write.
+// Above ULIM the user cannot read or write.
+void
+mem_init(void)
+```
 ```c
 	// create initial page directory.
 	kern_pgdir = (pde_t *) boot_alloc(PGSIZE);
@@ -324,6 +414,32 @@ The following is a general virtual memory layout of a process in JOS.
 ```
 
 ```c
+//
+// Map [va, va+size) of virtual address space to physical [pa, pa+size)
+// in the page table rooted at pgdir.  Size is a multiple of PGSIZE, and
+// va and pa are both page-aligned.
+// Use permission bits perm|PTE_P for the entries.
+//
+// This function is only intended to set up the ``static'' mappings
+// above UTOP. As such, it should *not* change the pp_ref field on the
+// mapped pages.
+//
+// Hint: the TA solution uses pgdir_walk
+static void
+boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
+{
+	// Fill this function in
+    for(int i = 0; i < size; i += PGSIZE) {
+        pte_t* pte = pgdir_walk(pgdir, (void *) va, 1);
+        *pte = pa | perm | PTE_P;
+        va += PGSIZE;
+        pa += PGSIZE;
+    }
+}
+```
+
+To get the page table entry for a virtual address, we need to walk the page directory and the page table.
+```c
 // Given 'pgdir', a pointer to a page directory, pgdir_walk returns
 // a pointer to the page table entry (PTE) for linear address 'va'.
 // This requires walking the two-level page table structure.
@@ -367,34 +483,47 @@ pgdir_walk(pde_t *pgdir, const void *va, int create)
 }
 ```
 
+### Map a physical page to a virtual address
+To map a physical page to a virtual address,
+we need to find the page table entry for the virtual address and set the entry to the physical address.
 ```c
-//
-// Map [va, va+size) of virtual address space to physical [pa, pa+size)
-// in the page table rooted at pgdir.  Size is a multiple of PGSIZE, and
-// va and pa are both page-aligned.
-// Use permission bits perm|PTE_P for the entries.
-//
-// This function is only intended to set up the ``static'' mappings
-// above UTOP. As such, it should *not* change the pp_ref field on the
-// mapped pages.
-//
-// Hint: the TA solution uses pgdir_walk
-static void
-boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
+int
+page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 {
 	// Fill this function in
-    for(int i = 0; i < size; i += PGSIZE) {
-        pte_t* pte = pgdir_walk(pgdir, (void *) va, 1);
-        *pte = pa | perm | PTE_P;
-        va += PGSIZE;
-        pa += PGSIZE;
+    pte_t* pte = pgdir_walk(pgdir, va, 1);
+    if(pte == NULL) {
+        return -E_NO_MEM;
     }
+    pp->pp_ref++;
+    if(*pte & PTE_P) {
+        page_remove(pgdir, va);
+    }
+    *pte = page2pa(pp) | perm | PTE_P;
+    return 0;
 }
 ```
 
-
-
-
+### Unmap a physical page from a virtual address
+To unmap a physical page from a virtual address,
+we need to find the page table entry for the virtual address and set the entry to 0.
+Also, we need to decrement the reference count of the physical page.
+```c
+void
+page_remove(pde_t *pgdir, void *va)
+{
+	// Fill this function in
+    pte_t* pte;
+    struct PageInfo* page = page_lookup(pgdir, va, &pte);
+    if(page == NULL) {
+        return;
+    }
+    page_decref(page);
+    *pte = 0;
+    tlb_invalidate(pgdir, va);
+    return;
+}
+```
 
 
 

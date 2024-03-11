@@ -199,10 +199,10 @@ page_free(struct PageInfo *pp)
 ## Virtual Memory Management
 Every process has its own virtual address space.
 The whole virtual address space is divided into kernel space and user space.
-Processes can only access data in the virtual memory.
+Both of them can be divided into many virtual pages.
 To read or write data in a virtual page, process usually needs to give a linear address that consists of a segment base and an offset.
 Adding the segment base to the offset gives the logical address of the data.
-Then we need to translate the logical address to a physical address using the 2-level page table.
+Then the logical address is translated to a physical address using the 2-level page table.
 
 The following is a general virtual memory layout of a process in JOS.
 

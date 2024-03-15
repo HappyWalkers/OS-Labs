@@ -31,16 +31,11 @@ sched_yield(void)
 
 	// LAB 4: Your code here.
     int current_env_index = curenv == NULL ? 0 : ENVX(curenv->env_id);
-    for(int i = current_env_index; i < NENV; i++) {
-        if(envs[i].env_status == ENV_RUNNABLE) {
-            cprintf("sched_yield: envs[%d] is runnable\n", i);
-            env_run(&envs[i]);
-        }
-    }
-    for(int i = 0; i < current_env_index; i++) {
-        if(envs[i].env_status == ENV_RUNNABLE) {
-            cprintf("sched_yield: envs[%d] is runnable\n", i);
-            env_run(&envs[i]);
+    for(int i = current_env_index + 1; i < current_env_index + 1 + NENV; i++) {
+        int index = i % NENV;
+        if(envs[index].env_status == ENV_RUNNABLE) {
+            cprintf("sched_yield: envs[%d] is runnable\n", index);
+            env_run(&envs[index]);
         }
     }
     // if the program reaches here, it means no runnable environments are found

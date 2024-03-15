@@ -245,6 +245,7 @@ trap_dispatch(struct Trapframe *tf)
             return;
         default:
             // Unexpected trap: The user process or the kernel has a bug.
+            cprintf("Unexpected trap %d\n", tf->tf_trapno);
             print_trapframe(tf);
             if (tf->tf_cs == GD_KT)
                 panic("unhandled trap in kernel");

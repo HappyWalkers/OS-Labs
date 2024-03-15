@@ -405,8 +405,7 @@ syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, 
 	// Call the function corresponding to the 'syscallno' parameter.
 	// Return any appropriate return value.
 	// LAB 3: Your code here.
-
-
+//    cprintf("syscall: syscallno = %d\n", syscallno);
 	switch (syscallno) {
         case SYS_cputs:
 //            cprintf("syscall cputs\n");
@@ -438,8 +437,10 @@ syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, 
         case SYS_env_set_pgfault_upcall:
             return sys_env_set_pgfault_upcall((envid_t)a1, (void *)a2);
         case SYS_ipc_try_send:
+//            cprintf("syscall ipc_try_send\n");
             return sys_ipc_try_send((envid_t)a1, (uint32_t)a2, (void *)a3, (unsigned)a4);
         case SYS_ipc_recv:
+//            cprintf("syscall ipc_recv\n");
             return sys_ipc_recv((void *)a1);
         default:
             return -E_INVAL;

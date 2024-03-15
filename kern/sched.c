@@ -11,7 +11,7 @@ void sched_halt(void);
 void
 sched_yield(void)
 {
-    cprintf("sched_yield\n");
+//    cprintf("sched_yield\n");
 	struct Env *idle;
 
 	// Implement simple round-robin scheduling.
@@ -34,18 +34,18 @@ sched_yield(void)
     for(int i = current_env_index + 1; i < current_env_index + 1 + NENV; i++) {
         int index = i % NENV;
         if(envs[index].env_status == ENV_RUNNABLE) {
-            cprintf("sched_yield: envs[%d] is runnable\n", index);
+//            cprintf("sched_yield: envs[%d] is runnable\n", index);
             env_run(&envs[index]);
         }
     }
     // if the program reaches here, it means no runnable environments are found
     if(curenv != NULL && curenv->env_status == ENV_RUNNING) {
-        cprintf("sched_yield: no runnable environments found, but the current environment is still running\n");
+//        cprintf("sched_yield: no runnable environments found, but the current environment is still running\n");
         env_run(curenv);
     }
 
 	// sched_halt never returns
-    cprintf("sched_yield: no runnable environments found, halting the cpu\n");
+//    cprintf("sched_yield: no runnable environments found, halting the cpu\n");
 	sched_halt();
 }
 

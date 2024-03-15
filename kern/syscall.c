@@ -326,7 +326,47 @@ static int
 sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, unsigned perm)
 {
 	// LAB 4: Your code here.
-	panic("sys_ipc_try_send not implemented");
+    struct Env *env;
+    int r;
+    if((r = envid2env(envid, &env, 0) < 0)) {
+        cprintf("sys_ipc_try_send: envid2env failed\n");
+        return r;
+    }
+    if(!env->env_ipc_recving) {
+        cprintf("sys_ipc_try_send: env is not currently blocked in sys_ipc_recv\n");
+        return -E_IPC_NOT_RECV;
+    }
+    if((uint32_t)srcva < UTOP) {
+        if((uint32_t)srcva % PGSIZE != 0) {
+            cprintf("sys_ipc_try_send: srcva is not page-aligned\n");
+            return -E_INVAL;
+        }
+        if((perm & (PTE_U | PTE_P)) != (PTE_U | PTE_P)) {
+            cprintf("sys_ipc_try_send: perm is inappropriate\n");
+            return -E_INVAL;
+        }
+        pte_t *pte;
+        struct PageInfo *pageInfo = page_lookup(curenv->env_pgdir, srcva, &pte);
+        if(pageInfo == NULL) {
+            cprintf("sys_ipc_try_send: srcva is not mapped in the caller's address space\n");
+            return -E_INVAL;
+        }
+        if((perm & PTE_W) && !(*pte & PTE_W)) {
+            cprintf("sys_ipc_try_send: srcva is read-only in the current environment's address space\n");
+            return -E_INVAL;
+        }
+        if(env->env_ipc_dstva != NULL && (r = page_insert(env->env_pgdir, pageInfo, env->env_ipc_dstva, perm) < 0)) {
+            cprintf("sys_ipc_try_send: page_insert failed\n");
+            return r;
+        }
+        env->env_ipc_perm = perm;
+    }
+    env->env_ipc_recving = false;
+    env->env_ipc_from = curenv->env_id;
+    env->env_ipc_value = value;
+    env->env_runs = ENV_RUNNABLE;
+    cprintf("sys_ipc_try_send success\n");
+    return 0;
 }
 
 // Block until a value is ready.  Record that you want to receive
@@ -344,7 +384,17 @@ static int
 sys_ipc_recv(void *dstva)
 {
 	// LAB 4: Your code here.
-	panic("sys_ipc_recv not implemented");
+    curenv->env_ipc_dstva = NULL;
+    if((int)dstva < UTOP) {
+        if((uint32_t)dstva % PGSIZE != 0) {
+            return -E_INVAL;
+        }else{
+            curenv->env_ipc_dstva = dstva;
+        }
+    }
+    curenv->env_ipc_recving = true;
+    curenv->env_runs = ENV_NOT_RUNNABLE;
+    sched_yield();
 	return 0;
 }
 
@@ -387,6 +437,10 @@ syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, 
             return sys_page_unmap((envid_t)a1, (void *)a2);
         case SYS_env_set_pgfault_upcall:
             return sys_env_set_pgfault_upcall((envid_t)a1, (void *)a2);
+        case SYS_ipc_try_send:
+            return sys_ipc_try_send((envid_t)a1, (uint32_t)a2, (void *)a3, (unsigned)a4);
+        case SYS_ipc_recv:
+            return sys_ipc_recv((void *)a1);
         default:
             return -E_INVAL;
 	}

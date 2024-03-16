@@ -47,6 +47,7 @@ ipc_recv(envid_t *from_env_store, void *pg, int *perm_store)
         *perm_store = thisenv->env_ipc_perm;
     }
 
+//    cprintf("ipc_recv: env %x receives value %d from env %x\n", thisenv->env_id, thisenv->env_ipc_value, thisenv->env_ipc_from);
 	return thisenv->env_ipc_value;
 }
 

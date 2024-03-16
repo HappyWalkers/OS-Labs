@@ -364,8 +364,8 @@ sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, unsigned perm)
     env->env_ipc_recving = false;
     env->env_ipc_from = curenv->env_id;
     env->env_ipc_value = value;
-    env->env_runs = ENV_RUNNABLE;
-    cprintf("sys_ipc_try_send success\n");
+    env->env_status = ENV_RUNNABLE;
+//    cprintf("sys_ipc_try_send: env %x sent value %d to env %x\n", curenv->env_id, value, env->env_id);
     return 0;
 }
 
@@ -393,7 +393,11 @@ sys_ipc_recv(void *dstva)
         }
     }
     curenv->env_ipc_recving = true;
-    curenv->env_runs = ENV_NOT_RUNNABLE;
+    curenv->env_status = ENV_NOT_RUNNABLE;
+//    cprintf("sys_ipc_recv: set the status of env %x to ENV_NOT_RUNNABLE\n", curenv->env_id);
+//    cprintf("envs[curenv->envid].status = %x\n", envs[ENVX(curenv->env_id)].env_status);
+//    cprintf("curenv: %x\n", curenv);
+//    cprintf("envs[curenv->envid]: %x\n", &envs[ENVX(curenv->env_id)]);
     sched_yield();
 	return 0;
 }

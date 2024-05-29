@@ -32,7 +32,7 @@ syscall(int num, int check, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, 
 		     : "cc", "memory");
 
 	if(check && ret > 0)
-		panic("syscall %d returned %d (> 0)", num, ret);
+		panic("syscall %d returned %d (> 0)\n", num, ret);
 
 	return ret;
 }
@@ -108,12 +108,12 @@ sys_env_set_pgfault_upcall(envid_t envid, void *upcall)
 int
 sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, int perm)
 {
-	return syscall(SYS_ipc_try_send, 0, envid, value, (uint32_t) srcva, perm, 0);
+	return syscall(SYS_ipc_try_send, 1, envid, value, (uint32_t) srcva, perm, 0);
 }
 
 int
 sys_ipc_recv(void *dstva)
 {
-	return syscall(SYS_ipc_recv, 1, (uint32_t)dstva, 0, 0, 0, 0);
+	return syscall(SYS_ipc_recv, 0, (uint32_t)dstva, 0, 0, 0, 0);
 }
 

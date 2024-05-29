@@ -333,7 +333,7 @@ sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, unsigned perm)
         return r;
     }
     if(!env->env_ipc_recving) {
-        cprintf("sys_ipc_try_send: env is not currently blocked in sys_ipc_recv\n");
+        // cprintf("sys_ipc_try_send: env is not currently blocked in sys_ipc_recv\n");
         return -E_IPC_NOT_RECV;
     }
     if((uint32_t)srcva < UTOP) {

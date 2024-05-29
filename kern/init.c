@@ -48,8 +48,8 @@ i386_init(void)
 	// Starting non-boot CPUs
 	boot_aps();
 
-	// Start fs.
-	ENV_CREATE(fs_fs, ENV_TYPE_FS);
+	// // Start fs.
+	// ENV_CREATE(fs_fs, ENV_TYPE_FS);
 
 #if defined(TEST)
 	// Don't touch -- used by grading script!

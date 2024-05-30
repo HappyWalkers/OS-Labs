@@ -194,6 +194,8 @@ dir_lookup(struct File *dir, const char *name, struct File **file)
 
 // Set *file to point at a free File structure in dir.  The caller is
 // responsible for filling in the File fields.
+// Scan through the content of the directory to find a empty file entry.
+// If no empty entry is found, allocate a new block for the directory.
 static int
 dir_alloc_file(struct File *dir, struct File **file)
 {
@@ -252,6 +254,8 @@ walk_path(const char *path, struct File **pdir, struct File **pf, char *lastelem
 	dir = 0;
 	name[0] = 0;
 
+	// Starting from the root, find the next directory entry.
+	// Iterate over the path components until we find the file.
 	if (pdir)
 		*pdir = 0;
 	*pf = 0;

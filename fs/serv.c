@@ -207,14 +207,24 @@ serve_set_size(envid_t envid, struct Fsreq_set_size *req)
 int
 serve_read(envid_t envid, union Fsipc *ipc)
 {
+    int r;
+    struct OpenFile *o;
 	struct Fsreq_read *req = &ipc->read;
 	struct Fsret_read *ret = &ipc->readRet;
 
 	if (debug)
 		cprintf("serve_read %08x %08x %08x\n", envid, req->req_fileid, req->req_n);
 
-	// Lab 5: Your code here:
-	return 0;
+    if ((r = openfile_lookup(envid, req->req_fileid, &o)) < 0)
+        return r;
+
+    r = file_read(o->o_file, ret->ret_buf, req->req_n, o->o_fd->fd_offset);
+    if (r < 0) {
+        return r;
+    }else{
+        o->o_fd->fd_offset += r;
+        return r;
+    }
 }
 
 

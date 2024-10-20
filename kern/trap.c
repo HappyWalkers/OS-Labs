@@ -230,10 +230,6 @@ trap_dispatch(struct Trapframe *tf)
 {
 	// Handle processor exceptions.
 	// LAB 3: Your code here.
-    // Add time tick increment to clock interrupts.
-    // Be careful! In multiprocessors, clock interrupts are
-    // triggered on every CPU.
-    // LAB 6: Your code here.
     switch (tf->tf_trapno) {
         case T_BRKPT:
             monitor(tf);
@@ -257,6 +253,12 @@ trap_dispatch(struct Trapframe *tf)
             print_trapframe(tf);
             return;
         case IRQ_OFFSET + IRQ_TIMER:
+            // Add time tick increment to clock interrupts.
+            // Be careful! In multiprocessors, clock interrupts are
+            // triggered on every CPU.
+            // LAB 6: Your code here.
+            time_tick();
+
             // Handle clock interrupts. Don't forget to acknowledge the
             // interrupt using lapic_eoi() before calling the scheduler!
             // LAB 4: Your code here.

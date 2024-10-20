@@ -90,6 +90,10 @@ CFLAGS += -std=gnu99
 CFLAGS += -static
 CFLAGS += -fno-pie
 CFLAGS += -Wall -Wno-format -Wno-unused -Werror -gstabs -m32
+# On most architectures, reading or writing unaligned pointers suffers some sort of penalty. 
+# On some processors, doing this causes a bus error, which usually terminates the program immediately. 
+# On others, such as x86, unaligned reads and writes are legal but suffer a performance penalty due to how the hardware is structured.
+CFLAGS += -Wno-address-of-packed-member
 # -fno-tree-ch prevented gcc from sometimes reordering read_ebp() before
 # mon_backtrace()'s function prologue on gcc version: (Debian 4.7.2-5) 4.7.2
 CFLAGS += -fno-tree-ch

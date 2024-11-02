@@ -1,6 +1,7 @@
 #include <kern/e1000.h>
 #include <kern/pmap.h>
 #include <inc/string.h>
+#include <inc/error.h>
 
 
 volatile uint32_t * e1000_mmio_base_addr;
@@ -24,6 +25,10 @@ e1000_attach(struct pci_func *pcif)
     cprintf("e1000_attach: status %x\n", E1000_REG(E1000_STATUS_OFFSET));
 
     e1000_tx_init();
+
+    char *str = "hello";
+    e1000_transmit(str, 6);
+
 
     return 0;
 }
@@ -54,4 +59,27 @@ e1000_tx_init()
     E1000_REG(E1000_TIPG) |= E1000_DEFAULT_TIPG_IPGT |
                              (E1000_DEFAULT_TIPG_IPGR1 << E1000_TIPG_IPGR1_SHIFT) |
                              (E1000_DEFAULT_TIPG_IPGR2 << E1000_TIPG_IPGR2_SHIFT);
+}
+
+int
+e1000_transmit(const void *buf, size_t size)
+{
+    int tail = E1000_REG(E1000_TDT);
+
+    if (size > ETH_PKT_SIZE) {
+        return -E_PKT_TOO_LARGE;
+    }
+
+    if ((e1000_tx_queue[tail].cmd & E1000_TXD_CMD_RS) && !(e1000_tx_queue[tail].status & E1000_TXD_STAT_DD)) {
+        return -E_TX_FULL;
+    }
+
+    e1000_tx_queue[tail].status &= ~E1000_TXD_STAT_DD;
+    memcpy(e1000_tx_buf[tail], buf, size);
+    e1000_tx_queue[tail].length = size;
+    e1000_tx_queue[tail].cmd |= E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
+
+    E1000_REG(E1000_TDT) = (tail + 1) % NTXDESC;
+
+    return 0;
 }

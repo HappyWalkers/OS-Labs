@@ -45,8 +45,18 @@ e1000_attach(struct pci_func *pcif);
 #define E1000_TIPG_IPGR1_SHIFT      10
 #define E1000_TIPG_IPGR2_SHIFT      20
 
+#define ETH_PKT_SIZE 1518
+/* Transmit Descriptor bit definitions */
+#define E1000_TXD_CMD_EOP   0x01  /* End of Packet */
+#define E1000_TXD_CMD_RS    0x08  /* Report Status */
+#define E1000_TXD_STAT_DD   0x01  /* Descriptor Done */
+
+
+
 static void
 e1000_tx_init();
+int
+e1000_transmit(const void *buf, size_t size);
 
 struct tx_desc
 {

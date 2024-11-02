@@ -26,10 +26,6 @@ e1000_attach(struct pci_func *pcif)
 
     e1000_tx_init();
 
-    char *str = "hello";
-    e1000_transmit(str, 6);
-
-
     return 0;
 }
 

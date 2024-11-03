@@ -116,3 +116,26 @@ e1000_transmit(const void *buf, size_t size)
 
     return 0;
 }
+
+int
+e1000_receive(void *buf, size_t size)
+{
+    int tail = E1000_REG(E1000_RDT);
+    int next = (tail + 1) % NRXDESC;
+    int length;
+
+    if (!(e1000_rx_queue[next].status & E1000_RXD_STAT_DD)) {
+        return -E_RX_EMPTY;
+    }
+
+    if ((length = e1000_rx_queue[next].length) > size) {
+        return -E_PKT_TOO_LARGE;
+    }
+
+    memcpy(buf, e1000_rx_buf[next], length);
+    e1000_rx_queue[next].status &= ~E1000_RXD_STAT_DD;
+
+    E1000_REG(E1000_RDT) = next;
+
+    return length;
+}

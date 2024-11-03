@@ -92,6 +92,8 @@ static void
 e1000_rx_init();
 int
 e1000_transmit(const void *buf, size_t size);
+int
+e1000_receive(void *buf, size_t size);
 
 struct tx_desc
 {

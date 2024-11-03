@@ -446,6 +446,14 @@ sys_transmit_packet(void *packet, size_t len)
     return e1000_transmit(packet, len);
 }
 
+// receive a package from user space
+static int
+sys_receive_packet(void *packet, size_t len)
+{
+    user_mem_assert(curenv, packet, len, PTE_U | PTE_P);
+    return e1000_receive(packet, len);
+}
+
 // Dispatches to the correct kernel function, passing the arguments.
 int32_t
 syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5)
@@ -496,6 +504,8 @@ syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, 
             return sys_time_msec();
         case SYS_transmit_packet:
             return sys_transmit_packet((void *)a1, (size_t)a2);
+        case SYS_receive_packet:
+            return sys_receive_packet((void *)a1, (size_t)a2);
         default:
             return -E_INVAL;
 	}

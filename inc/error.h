@@ -29,6 +29,7 @@ enum {
     // network error codes
     E_PKT_TOO_LARGE,
     E_TX_FULL,
+    E_RX_EMPTY,
 
 
 	MAXERROR

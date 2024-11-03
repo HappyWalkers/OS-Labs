@@ -83,6 +83,7 @@ e1000_attach(struct pci_func *pcif);
 #define JOS_DEFAULT_MAC_LOW     0x12005452
 #define JOS_DEFAULT_MAC_HIGH    0x00005634
 
+#define E1000_RXD_STAT_DD       0x01    /* Descriptor Done */
 
 
 

@@ -12,6 +12,12 @@ volatile uint32_t * e1000_mmio_base_addr;
 static struct tx_desc e1000_tx_queue[NTXDESC] __attribute__((aligned(16)));
 static uint8_t e1000_tx_buf[NTXDESC][TX_BUF_SIZE];
 
+#define RX_BUF_SIZE 2048
+#define NRXDESC     128
+
+static struct e1000_rx_desc e1000_rx_queue[NRXDESC] __attribute__((aligned(16)));
+static uint8_t e1000_rx_buf[NRXDESC][RX_BUF_SIZE];
+
 
 // LAB 6: Your driver code here
 int
@@ -25,6 +31,7 @@ e1000_attach(struct pci_func *pcif)
     cprintf("e1000_attach: status %x\n", E1000_REG(E1000_STATUS_OFFSET));
 
     e1000_tx_init();
+    e1000_rx_init();
 
     return 0;
 }
@@ -56,6 +63,36 @@ e1000_tx_init()
                              (E1000_DEFAULT_TIPG_IPGR1 << E1000_TIPG_IPGR1_SHIFT) |
                              (E1000_DEFAULT_TIPG_IPGR2 << E1000_TIPG_IPGR2_SHIFT);
 }
+
+
+static void
+e1000_rx_init()
+{
+    // initialize rx queue
+    int i;
+    memset(e1000_rx_queue, 0, sizeof(e1000_rx_queue));
+    for (i = 0; i < NRXDESC; i++) {
+        e1000_rx_queue[i].addr = PADDR(e1000_rx_buf[i]);
+    }
+
+    // initialize receive address registers
+    // by default, it comes from EEPROM
+    E1000_REG(E1000_RAL) = JOS_DEFAULT_MAC_LOW;
+    E1000_REG(E1000_RAH) = JOS_DEFAULT_MAC_HIGH;
+    E1000_REG(E1000_RAH) |= E1000_RAH_AV;
+
+    // initialize receive descriptor registers
+    E1000_REG(E1000_RDBAL) = PADDR(e1000_rx_queue);
+    E1000_REG(E1000_RDBAH) = 0;
+    E1000_REG(E1000_RDLEN) = sizeof(e1000_rx_queue);
+    E1000_REG(E1000_RDH) = 0;
+    E1000_REG(E1000_RDT) = NRXDESC - 1;
+
+    // initialize transmit control registers
+    E1000_REG(E1000_RCTL) &= ~(E1000_RCTL_LBM | E1000_RCTL_RDMTS | E1000_RCTL_SZ | E1000_RCTL_BSEX);
+    E1000_REG(E1000_RCTL) |= E1000_RCTL_EN | E1000_RCTL_SECRC;
+}
+
 
 int
 e1000_transmit(const void *buf, size_t size)

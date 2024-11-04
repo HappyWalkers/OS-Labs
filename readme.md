@@ -1017,7 +1017,40 @@ struct Env {
 };
 ```
 
+Here's what the `Env` fields are for:
+
+- **env_tf**:
+
+  This structure, defined in `inc/trap.h`, holds the saved register values for the environment while that environment is *not* running: i.e., when the kernel or a different environment is running. The kernel saves these when switching from user to kernel mode, so that the environment can later be resumed where it left off.
+
+- **env_link**:
+
+  This is a link to the next `Env` on the `env_free_list`. `env_free_list` points to the first free environment on the list.
+
+- **env_id**:
+
+  The kernel stores here a value that uniquely identifiers the environment currently using this `Env` structure (i.e., using this particular slot in the `envs` array). After a user environment terminates, the kernel may re-allocate the same `Env` structure to a different environment - but the new environment will have a different `env_id` from the old one even though the new environment is re-using the same slot in the `envs` array.
+
+- **env_parent_id**:
+
+  The kernel stores here the `env_id` of the environment that created this environment. In this way the environments can form a “family tree,” which will be useful for making security decisions about which environments are allowed to do what to whom.
+
+- **env_type**:
+
+  This is used to distinguish special environments. For most environments, it will be `ENV_TYPE_USER`. We'll introduce a few more types for special system service environments in later labs.
+
+- **env_status**:
+
+  This variable holds one of the following values:`ENV_FREE`:Indicates that the `Env` structure is inactive, and therefore on the `env_free_list`.`ENV_RUNNABLE`:Indicates that the `Env` structure represents an environment that is waiting to run on the processor.`ENV_RUNNING`:Indicates that the `Env` structure represents the currently running environment.`ENV_NOT_RUNNABLE`:Indicates that the `Env` structure represents a currently active environment, but it is not currently ready to run: for example, because it is waiting for an interprocess communication (IPC) from another environment.`ENV_DYING`:Indicates that the `Env` structure represents a zombie environment. A zombie environment will be freed the next time it traps to the kernel. We will not use this flag until Lab 4.
+
+- **env_pgdir**:
+
+  This variable holds the kernel *virtual address* of this environment's page directory.
+
+Like a Unix process, a JOS environment couples the concepts of "thread" and "address space". The thread is defined primarily by the saved registers (the `env_tf` field), and the address space is defined by the page directory and page tables pointed to by `env_pgdir`. To run an environment, the kernel must set up the CPU with *both* the saved registers and the appropriate address space.
+
 ### Initialization
+
 The processes are organized in a array so that we can easily find a process by its id.
 They are also linked in a list that contains all the free processes that can be allocated.
 The array and the linked list are initialized in the function `env_init` in the file `kern/env.c`.
@@ -1238,6 +1271,341 @@ struct Trapframe {
 # File System
 
 # Network
+
+## Network Server
+
+Writing a network stack from scratch is hard work. Instead, we will be using lwIP, an open source lightweight TCP/IP protocol suite that among many things includes a network stack. You can find more information on lwIP [here](https://savannah.nongnu.org/projects/lwip/). In this assignment, as far as we are concerned, lwIP is a black box that implements a BSD socket interface and has a packet input port and packet output port.
+
+The network server is actually a combination of four environments:
+
+- core network server environment (includes socket call dispatcher and lwIP)
+- input environment
+- output environment
+- timer environment
+
+The following diagram shows the different environments and their relationships. The diagram shows the entire system including the device driver, which will be covered later. In this lab, you will implement the parts highlighted in green.
+
+![ns](./ns.png)
+
+### The Core Network Server Environment
+
+The core network server environment is composed of the socket call dispatcher and lwIP itself. The socket call dispatcher works exactly like the file server. User environments use stubs (found in `lib/nsipc.c`) to send IPC messages to the core network environment. If you look at `lib/nsipc.c` you will see that we find the core network server the same way we found the file server: `i386_init` created the NS environment with NS_TYPE_NS, so we scan `envs`, looking for this special environment type. For each user environment IPC, the dispatcher in the network server calls the appropriate BSD socket interface function provided by lwIP on behalf of the user.
+
+Regular user environments do not use the `nsipc_*` calls directly. Instead, they use the functions in `lib/sockets.c`, which provides a file descriptor-based sockets API. Thus, user environments refer to sockets via file descriptors, just like how they referred to on-disk files. A number of operations (`connect`, `accept`, etc.) are specific to sockets, but `read`, `write`, and `close` go through the normal file descriptor device-dispatch code in `lib/fd.c`. Much like how the file server maintained internal unique ID's for all open files, lwIP also generates unique ID's for all open sockets. In both the file server and the network server, we use information stored in `struct Fd` to map per-environment file descriptors to these unique ID spaces.
+
+Even though it may seem that the IPC dispatchers of the file server and network server act the same, there is a key difference. BSD socket calls like `accept` and `recv` can block indefinitely. If the dispatcher were to let lwIP execute one of these blocking calls, the dispatcher would also block and there could only be one outstanding network call at a time for the whole system. Since this is unacceptable, the network server uses user-level threading to avoid blocking the entire server environment. For every incoming IPC message, the dispatcher creates a thread and processes the request in the newly created thread. If the thread blocks, then only that thread is put to sleep while other threads continue to run.
+
+In addition to the core network environment there are three helper environments. Besides accepting messages from user applications, the core network environment's dispatcher also accepts messages from the input and timer environments.
+
+[net/serv.c](net/serv.c)
+
+```c
+
+void
+umain(int argc, char **argv)
+{
+	envid_t ns_envid = sys_getenvid();
+
+	binaryname = "ns";
+
+	// fork off the timer thread which will send us periodic messages
+	timer_envid = fork();
+	if (timer_envid < 0)
+		panic("error forking");
+	else if (timer_envid == 0) {
+		timer(ns_envid, TIMER_INTERVAL);
+		return;
+	}
+
+	// fork off the input thread which will poll the NIC driver for input
+	// packets
+	input_envid = fork();
+	if (input_envid < 0)
+		panic("error forking");
+	else if (input_envid == 0) {
+		input(ns_envid);
+		return;
+	}
+
+	// fork off the output thread that will send the packets to the NIC
+	// driver
+	output_envid = fork();
+	if (output_envid < 0)
+		panic("error forking");
+	else if (output_envid == 0) {
+		output(ns_envid);
+		return;
+	}
+
+	// lwIP requires a user threading library; start the library and jump
+	// into a thread to continue initialization.
+	thread_init();
+	thread_create(0, "main", tmain, 0);
+	thread_yield();
+	// never coming here!
+}
+
+```
+
+
+
+### The Output Environment
+
+When servicing user environment socket calls, lwIP will generate packets for the network card to transmit. LwIP will send each packet to be transmitted to the output helper environment using the `NSREQ_OUTPUT` IPC message with the packet attached in the page argument of the IPC message. The output environment is responsible for accepting these messages and forwarding the packet on to the device driver via the system call interface that you will soon create.
+
+[net/output.c](net/output.c)
+
+```c
+
+void
+output(envid_t ns_envid)
+{
+	binaryname = "ns_output";
+
+	// LAB 6: Your code here:
+	// 	- read a packet from the network server
+	//	- send the packet to the device driver
+    uint32_t  req, whom;
+    int r;
+
+    while(true) {
+        req = ipc_recv((int32_t *) &whom, &nsipcbuf, 0);
+        if (whom != ns_envid) {
+            cprintf("NS OUTPUT: got IPC message from env %x not NS\n", whom);
+            continue;
+        }
+        if (req != NSREQ_OUTPUT) {
+            cprintf("NS OUTPUT: got IPC message type %d not NSREQ_OUTPUT\n", req);
+            continue;
+        }
+
+        while((r = sys_transmit_packet(nsipcbuf.pkt.jp_data, nsipcbuf.pkt.jp_len)) == -E_TX_FULL) {
+            sys_yield();
+        }
+
+        if (r < 0) {
+            panic("NS OUTPUT: sys_transmit_packet: %e", r);
+        }
+    }
+}
+```
+
+
+
+### The Input Environment
+
+Packets received by the network card need to be injected into lwIP. For every packet received by the device driver, the input environment pulls the packet out of kernel space (using kernel system calls that you will implement) and sends the packet to the core server environment using the `NSREQ_INPUT` IPC message.
+
+The packet input functionality is separated from the core network environment because JOS makes it hard to simultaneously accept IPC messages and poll or wait for a packet from the device driver. We do not have a `select` system call in JOS that would allow environments to monitor multiple input sources to identify which input is ready to be processed.
+
+```c
+
+void
+input(envid_t ns_envid)
+{
+	binaryname = "ns_input";
+
+	// LAB 6: Your code here:
+	// 	- read a packet from the device driver
+	//	- send it to the network server
+	// Hint: When you IPC a page to the network server, it will be
+	// reading from it for a while, so don't immediately receive
+	// another packet in to the same physical page.
+    uint8_t buf[2048];
+    int r, i;
+    while(true) {
+        while((r = sys_receive_packet(buf, sizeof(buf))) == -E_RX_EMPTY) {
+            sys_yield();
+        }
+        if (r < 0) {
+            panic("NS INPUT: sys_receive_packet: %e", r);
+        }
+
+        nsipcbuf.pkt.jp_len = r;
+        memmove(nsipcbuf.pkt.jp_data, buf, r);
+
+        ipc_send(ns_envid, NSREQ_INPUT, &nsipcbuf, PTE_P|PTE_W|PTE_U);
+
+        // wait for the network server to process the packet
+        sys_yield();
+        sys_yield();
+        sys_yield();
+        sys_yield();
+        sys_yield();
+        sys_yield();
+    }
+}
+
+```
+
+
+
+### The Timer Environment
+
+The timer environment periodically sends messages of type `NSREQ_TIMER` to the core network server notifying it that a timer has expired. The timer messages from this thread are used by lwIP to implement various network timeouts.
+
+## Network Interface Card Driver
+
+### PCI Interface
+
+The E1000 is a PCI device, which means it plugs into the PCI bus on the motherboard. The PCI bus has address, data, and interrupt lines, and allows the CPU to communicate with PCI devices and PCI devices to read and write memory. A PCI device needs to be discovered and initialized before it can be used. Discovery is the process of walking the PCI bus looking for attached devices. Initialization is the process of allocating I/O and memory space as well as negotiating the IRQ line for the device to use.
+
+We have provided you with PCI code in `kern/pci.c`. To perform PCI initialization during boot, the PCI code walks the PCI bus looking for devices. When it finds a device, it reads its vendor ID and device ID and uses these two values as a key to search the `pci_attach_vendor` array. The array is composed of `struct pci_driver` entries like this:
+
+```c
+struct pci_driver {
+    uint32_t key1, key2;
+    int (*attachfn) (struct pci_func *pcif);
+};
+```
+
+If the discovered device's vendor ID and device ID match an entry in the array, the PCI code calls that entry's `attachfn` to perform device initialization. (Devices can also be identified by class, which is what the other driver table in `kern/pci.c` is for.)
+
+The attach function is passed a *PCI function* to initialize. A PCI card can expose multiple functions, though the E1000 exposes only one. Here is how we represent a PCI function in JOS:
+
+```c
+struct pci_func {
+    struct pci_bus *bus;
+
+    uint32_t dev;
+    uint32_t func;
+
+    uint32_t dev_id;
+    uint32_t dev_class;
+
+    uint32_t reg_base[6];
+    uint32_t reg_size[6];
+    uint8_t irq_line;
+};
+```
+
+The above structure reflects some of the entries found in Table 4-1 of Section 4.1 of the developer manual. The last three entries of `struct pci_func` are of particular interest to us, as they record the negotiated memory, I/O, and interrupt resources for the device. The `reg_base` and `reg_size` arrays contain information for up to six Base Address Registers or BARs. `reg_base` stores the base memory addresses for memory-mapped I/O regions (or base I/O ports for I/O port resources), `reg_size` contains the size in bytes or number of I/O ports for the corresponding base values from `reg_base`, and `irq_line` contains the IRQ line assigned to the device for interrupts. The specific meanings of the E1000 BARs are given in the second half of table 4-2.
+
+When the attach function of a device is called, the device has been found but not yet *enabled*. This means that the PCI code has not yet determined the resources allocated to the device, such as address space and an IRQ line, and, thus, the last three elements of the `struct pci_func` structure are not yet filled in. The attach function should call `pci_func_enable`, which will enable the device, negotiate these resources, and fill in the `struct pci_func`.
+
+### Memory-mapped I/O
+
+Software communicates with the E1000 via *memory-mapped I/O* (MMIO). You've seen this twice before in JOS: both the CGA console and the LAPIC are devices that you control and query by writing to and reading from "memory". But these reads and writes don't go to DRAM; they go directly to these devices.
+
+`pci_func_enable` negotiates an MMIO region with the E1000 and stores its base and size in BAR 0 (that is, `reg_base[0]` and `reg_size[0]`). This is a range of *physical memory addresses* assigned to the device, which means you'll have to do something to access it via virtual addresses. Since MMIO regions are assigned very high physical addresses (typically above 3GB), you can't use `KADDR` to access it because of JOS's 256MB limit. Thus, you'll have to create a new memory mapping. We'll use the area above MMIOBASE (your `mmio_map_region` from lab 4 will make sure we don't overwrite the mapping used by the LAPIC). Since PCI device initialization happens before JOS creates user environments, you can create the mapping in `kern_pgdir` and it will always be available.
+
+### DMA
+
+You could imagine transmitting and receiving packets by writing and reading from the E1000's registers, but this would be slow and would require the E1000 to buffer packet data internally. Instead, the E1000 uses *Direct Memory Access* or DMA to read and write packet data directly from memory without involving the CPU. The driver is responsible for allocating memory for the transmit and receive queues, setting up DMA descriptors, and configuring the E1000 with the location of these queues, but everything after that is asynchronous. To transmit a packet, the driver copies it into the next DMA descriptor in the transmit queue and informs the E1000 that another packet is available; the E1000 will copy the data out of the descriptor when there is time to send the packet. Likewise, when the E1000 receives a packet, it copies it into the next DMA descriptor in the receive queue, which the driver can read from at its next opportunity.
+
+The receive and transmit queues are very similar at a high level. Both consist of a sequence of *descriptors*. While the exact structure of these descriptors varies, each descriptor contains some flags and the physical address of a buffer containing packet data (either packet data for the card to send, or a buffer allocated by the OS for the card to write a received packet to).
+
+The queues are implemented as circular arrays, meaning that when the card or the driver reach the end of the array, it wraps back around to the beginning. Both have a *head pointer* and a *tail pointer* and the contents of the queue are the descriptors between these two pointers. The hardware always consumes descriptors from the head and moves the head pointer, while the driver always add descriptors to the tail and moves the tail pointer. The descriptors in the transmit queue represent packets waiting to be sent (hence, in the steady state, the transmit queue is empty). For the receive queue, the descriptors in the queue are free descriptors that the card can receive packets into (hence, in the steady state, the receive queue consists of all available receive descriptors). Correctly updating the tail register without confusing the E1000 is tricky; be careful!
+
+The pointers to these arrays as well as the addresses of the packet buffers in the descriptors must all be *physical addresses* because hardware performs DMA directly to and from physical RAM without going through the MMU.
+
+### Transmitting Packets
+
+As an example, consider the legacy transmit descriptor given in table 3-8 of the manual and reproduced here:
+
+```
+63            48 47   40 39   32 31   24 23   16 15             0
+  +---------------------------------------------------------------+
+  |                         Buffer address                        |
+  +---------------+-------+-------+-------+-------+---------------+
+  |    Special    |  CSS  | Status|  Cmd  |  CSO  |    Length     |
+  +---------------+-------+-------+-------+-------+---------------+
+```
+
+The first byte of the structure starts at the top right, so to convert this into a C struct, read from right to left, top to bottom. If you squint at it right, you'll see that all of the fields even fit nicely into a standard-size types:
+
+```
+struct tx_desc
+{
+	uint64_t addr;
+	uint16_t length;
+	uint8_t cso;
+	uint8_t cmd;
+	uint8_t status;
+	uint8_t css;
+	uint16_t special;
+};
+```
+
+Your driver will have to reserve memory for the transmit descriptor array and the packet buffers pointed to by the transmit descriptors. There are several ways to do this, ranging from dynamically allocating pages to simply declaring them in global variables. Whatever you choose, keep in mind that the E1000 accesses physical memory directly, which means any buffer it accesses must be contiguous in physical memory.
+
+There are also multiple ways to handle the packet buffers. The simplest, which we recommend starting with, is to reserve space for a packet buffer for each descriptor during driver initialization and simply copy packet data into and out of these pre-allocated buffers. The maximum size of an Ethernet packet is 1518 bytes, which bounds how big these buffers need to be. More sophisticated drivers could dynamically allocate packet buffers (e.g., to reduce memory overhead when network usage is low) or even pass buffers directly provided by user space (a technique known as "zero copy"), but it's good to start simple.
+
+Now that transmit is initialized, you'll have to write the code to transmit a packet and make it accessible to user space via a system call. To transmit a packet, you have to add it to the tail of the transmit queue, which means copying the packet data into the next packet buffer and then updating the TDT (transmit descriptor tail) register to inform the card that there's another packet in the transmit queue. (Note that TDT is an *index* into the transmit descriptor array, not a byte offset; the documentation isn't very clear about this.)
+
+![image-20241103182100974](./transmit_descriptor_ring_structure.png)
+
+[](kern/e1000.c)
+
+```c
+
+int
+e1000_transmit(const void *buf, size_t size)
+{
+    int tail = E1000_REG(E1000_TDT);
+
+    if (size > ETH_PKT_SIZE) {
+        return -E_PKT_TOO_LARGE;
+    }
+
+    if ((e1000_tx_queue[tail].cmd & E1000_TXD_CMD_RS) && !(e1000_tx_queue[tail].status & E1000_TXD_STAT_DD)) {
+        return -E_TX_FULL;
+    }
+
+    e1000_tx_queue[tail].status &= ~E1000_TXD_STAT_DD;
+    memcpy(e1000_tx_buf[tail], buf, size);
+    e1000_tx_queue[tail].length = size;
+    e1000_tx_queue[tail].cmd |= E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
+
+    E1000_REG(E1000_TDT) = (tail + 1) % NTXDESC;
+
+    return 0;
+}
+```
+
+## Receiving Packets
+
+Just like you did for transmitting packets, you'll have to configure the E1000 to receive packets and provide a receive descriptor queue and receive descriptors. 
+
+The receive queue is very similar to the transmit queue, except that it consists of empty packet buffers waiting to be filled with incoming packets. Hence, when the network is idle, the transmit queue is empty (because all packets have been sent), but the receive queue is full (of empty packet buffers).
+
+When the E1000 receives a packet, it first checks if it matches the card's configured filters (for example, to see if the packet is addressed to this E1000's MAC address) and ignores the packet if it doesn't match any filters. Otherwise, the E1000 tries to retrieve the next receive descriptor from the head of the receive queue. If the head (RDH) has caught up with the tail (RDT), then the receive queue is out of free descriptors, so the card drops the packet. If there is a free receive descriptor, it copies the packet data into the buffer pointed to by the descriptor, sets the descriptor's DD (Descriptor Done) and EOP (End of Packet) status bits, and increments the RDH.
+
+If the E1000 receives a packet that is larger than the packet buffer in one receive descriptor, it will retrieve as many descriptors as necessary from the receive queue to store the entire contents of the packet. To indicate that this has happened, it will set the DD status bit on all of these descriptors, but only set the EOP status bit on the last of these descriptors. You can either deal with this possibility in your driver, or simply configure the card to not accept "long packets" (also known as *jumbo frames*) and make sure your receive buffers are large enough to store the largest possible standard Ethernet packet (1518 bytes).
+
+Software adds receive descriptors by writing the tail pointer with the index of the entry beyond the last valid descriptor. As packets arrive, they are stored in memory and the head pointer is incremented by hardware. When the head pointer is equal to the tail pointer, the ring is empty. Hardware stops storing packets in system memory until software advances the tail pointer, making more receive buffers available.
+
+![image-20241103182450059](./receive_descriptor_ring_structure.png)
+
+[kern/e1000.c](kern/e1000.c)
+
+```c
+
+int
+e1000_receive(void *buf, size_t size)
+{
+    int tail = E1000_REG(E1000_RDT);
+    int next = (tail + 1) % NRXDESC;
+    int length;
+
+    if (!(e1000_rx_queue[next].status & E1000_RXD_STAT_DD)) {
+        return -E_RX_EMPTY;
+    }
+
+    if ((length = e1000_rx_queue[next].length) > size) {
+        return -E_PKT_TOO_LARGE;
+    }
+
+    memcpy(buf, e1000_rx_buf[next], length);
+    e1000_rx_queue[next].status &= ~E1000_RXD_STAT_DD;
+
+    E1000_REG(E1000_RDT) = next;
+
+    return length;
+}
+```
+
+
 
 # Reference
 

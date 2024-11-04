@@ -1270,6 +1270,270 @@ struct Trapframe {
 
 # File System
 
+The file system you will work with is much simpler than most "real" file systems including that of xv6 UNIX, but it is powerful enough to provide the basic features: creating, reading, writing, and deleting files organized in a hierarchical directory structure.
+
+We are (for the moment anyway) developing only a single-user operating system, which provides protection sufficient to catch bugs but not to protect multiple mutually suspicious users from each other. Our file system therefore does not support the UNIX notions of file ownership or permissions. Our file system also currently does not support hard links, symbolic links, time stamps, or special device files like most UNIX file systems do.
+
+## On-Disk File System Structure
+
+Most UNIX file systems divide available disk space into two main types of regions: *inode* regions and *data* regions. UNIX file systems assign one *inode* to each file in the file system; a file's inode holds critical meta-data about the file such as its `stat` attributes and pointers to its data blocks. The data regions are divided into much larger (typically 8KB or more) *data blocks*, within which the file system stores file data and directory meta-data. Directory entries contain file names and pointers to inodes; a file is said to be *hard-linked* if multiple directory entries in the file system refer to that file's inode. Since our file system will not support hard links, we do not need this level of indirection and therefore can make a convenient simplification: our file system will not use inodes at all and instead will simply store all of a file's (or sub-directory's) meta-data within the (one and only) directory entry describing that file.
+
+Both files and directories logically consist of a series of data blocks, which may be scattered throughout the disk much like the pages of an environment's virtual address space can be scattered throughout physical memory. The file system environment hides the details of block layout, presenting interfaces for reading and writing sequences of bytes at arbitrary offsets within files. The file system environment handles all modifications to directories internally as a part of performing actions such as file creation and deletion. Our file system does allow user environments to *read* directory meta-data directly (e.g., with `read`), which means that user environments can perform directory scanning operations themselves (e.g., to implement the `ls` program) rather than having to rely on additional special calls to the file system. The disadvantage of this approach to directory scanning, and the reason most modern UNIX variants discourage it, is that it makes application programs dependent on the format of directory meta-data, making it difficult to change the file system's internal layout without changing or at least recompiling application programs as well.
+
+### Sectors and Blocks
+
+Most disks cannot perform reads and writes at byte granularity and instead perform reads and writes in units of *sectors*. In JOS, sectors are 512 bytes each. File systems actually allocate and use disk storage in units of *blocks*. Be wary of the distinction between the two terms: *sector size* is a property of the disk hardware, whereas *block size* is an aspect of the operating system using the disk. A file system's block size must be a multiple of the sector size of the underlying disk.
+
+The UNIX xv6 file system uses a block size of 512 bytes, the same as the sector size of the underlying disk. Most modern file systems use a larger block size, however, because storage space has gotten much cheaper and it is more efficient to manage storage at larger granularities. Our file system will use a block size of 4096 bytes, conveniently matching the processor's page size.
+
+### Superblocks
+
+![Disk layout](https://pdos.csail.mit.edu/6.828/2018/labs/lab5/disk.png)
+
+File systems typically reserve certain disk blocks at "easy-to-find" locations on the disk (such as the very start or the very end) to hold meta-data describing properties of the file system as a whole, such as the block size, disk size, any meta-data required to find the root directory, the time the file system was last mounted, the time the file system was last checked for errors, and so on. These special blocks are called *superblocks*.
+
+Our file system will have exactly one superblock, which will always be at block 1 on the disk. Its layout is defined by `struct Super` in `inc/fs.h`. Block 0 is typically reserved to hold boot loaders and partition tables, so file systems generally do not use the very first disk block. Many "real" file systems maintain multiple superblocks, replicated throughout several widely-spaced regions of the disk, so that if one of them is corrupted or the disk develops a media error in that region, the other superblocks can still be found and used to access the file system.
+
+### File Meta-data
+
+![File structure](https://pdos.csail.mit.edu/6.828/2018/labs/lab5/file.png)
+
+The layout of the meta-data describing a file in our file system is described by `struct File` in `inc/fs.h`. This meta-data includes the file's name, size, type (regular file or directory), and pointers to the blocks comprising the file. As mentioned above, we do not have inodes, so this meta-data is stored in a directory entry on disk. Unlike in most "real" file systems, for simplicity we will use this one `File` structure to represent file meta-data as it appears *both on disk and in memory*.
+
+The `f_direct` array in `struct File` contains space to store the block numbers of the first 10 (`NDIRECT`) blocks of the file, which we call the file's *direct* blocks. For small files up to 10*4096 = 40KB in size, this means that the block numbers of all of the file's blocks will fit directly within the `File` structure itself. For larger files, however, we need a place to hold the rest of the file's block numbers. For any file greater than 40KB in size, therefore, we allocate an additional disk block, called the file's *indirect block*, to hold up to 4096/4 = 1024 additional block numbers. Our file system therefore allows files to be up to 1034 blocks, or just over four megabytes, in size. To support larger files, "real" file systems typically support *double-* and *triple-indirect blocks* as well.
+
+### Directories versus Regular Files
+
+A `File` structure in our file system can represent either a *regular* file or a directory; these two types of "files" are distinguished by the `type` field in the `File` structure. The file system manages regular files and directory-files in exactly the same way, except that it does not interpret the contents of the data blocks associated with regular files at all, whereas the file system interprets the contents of a directory-file as a series of `File` structures describing the files and subdirectories within the directory.
+
+The superblock in our file system contains a `File` structure (the `root` field in `struct Super`) that holds the meta-data for the file system's root directory. The contents of this directory-file is a sequence of `File` structures describing the files and directories located within the root directory of the file system. Any subdirectories in the root directory may in turn contain more `File` structures representing sub-subdirectories, and so on.
+
+## FIle System Server
+
+### The Block Cache
+
+In our file system, we will implement a simple "buffer cache" (really just a block cache) with the help of the processor's virtual memory system. The code for the block cache is in `fs/bc.c`.
+
+Our file system will be limited to handling disks of size 3GB or less. We reserve a large, fixed 3GB region of the file system environment's address space, from 0x10000000 (`DISKMAP`) up to 0xD0000000 (`DISKMAP+DISKMAX`), as a "memory mapped" version of the disk. For example, disk block 0 is mapped at virtual address 0x10000000, disk block 1 is mapped at virtual address 0x10001000, and so on. The `diskaddr` function in `fs/bc.c` implements this translation from disk block numbers to virtual addresses (along with some sanity checking).
+
+Since our file system environment has its own virtual address space independent of the virtual address spaces of all other environments in the system, and the only thing the file system environment needs to do is to implement file access, it is reasonable to reserve most of the file system environment's address space in this way. It would be awkward for a real file system implementation on a 32-bit machine to do this since modern disks are larger than 3GB. Such a buffer cache management approach may still be reasonable on a machine with a 64-bit address space.
+
+Of course, it would take a long time to read the entire disk into memory, so instead we'll implement a form of *demand paging*, wherein we only allocate pages in the disk map region and read the corresponding block from the disk in response to a page fault in this region. This way, we can pretend that the entire disk is in memory.
+
+## The Block Bitmap
+
+After `fs_init` sets the `bitmap` pointer, we can treat `bitmap` as a packed array of bits, one for each block on the disk. See, for example, `block_is_free`, which simply checks whether a given block is marked free in the bitmap.
+
+[fs/fs.c](fs/fs.c)
+
+```c
+
+// --------------------------------------------------------------
+// Free block bitmap
+// --------------------------------------------------------------
+
+// Check to see if the block bitmap indicates that block 'blockno' is free.
+// Return 1 if the block is free, 0 if not.
+bool
+block_is_free(uint32_t blockno)
+{
+	if (super == 0 || blockno >= super->s_nblocks)
+		return 0;
+	if (bitmap[blockno / 32] & (1 << (blockno % 32)))
+		return 1;
+	return 0;
+}
+```
+
+
+
+## File Operations
+
+We have provided a variety of functions in `fs/fs.c` to implement the basic facilities you will need to interpret and manage `File` structures, scan and manage the entries of directory-files, and walk the file system from the root to resolve an absolute pathname. Read through *all* of the code in `fs/fs.c` and make sure you understand what each function does before proceeding.
+
+```c
+
+// Find the disk block number slot for the 'filebno'th block in file 'f'.
+// Set '*ppdiskbno' to point to that slot.
+// The slot will be one of the f->f_direct[] entries,
+// or an entry in the indirect block.
+// When 'alloc' is set, this function will allocate an indirect block
+// if necessary.
+//
+// Returns:
+//	0 on success (but note that *ppdiskbno might equal 0).
+//	-E_NOT_FOUND if the function needed to allocate an indirect block, but
+//		alloc was 0.
+//	-E_NO_DISK if there's no space on the disk for an indirect block.
+//	-E_INVAL if filebno is out of range (it's >= NDIRECT + NINDIRECT).
+//
+// Analogy: This is like pgdir_walk for files.
+// Hint: Don't forget to clear any block you allocate.
+static int
+file_block_walk(struct File *f, uint32_t filebno, uint32_t **ppdiskbno, bool alloc)
+{
+    // LAB 5: Your code here.
+    if (filebno >= NDIRECT + NINDIRECT) {
+        return -E_INVAL;
+    }
+    if (filebno < NDIRECT) {
+        *ppdiskbno = &f->f_direct[filebno];
+        return 0;
+    }
+    if (f->f_indirect == 0) {
+        if (!alloc) {
+               return -E_NOT_FOUND;
+        }
+        int r = alloc_block();
+        if (r < 0) {
+               return -E_NO_DISK;
+        }
+        f->f_indirect = r;
+        memset(diskaddr(f->f_indirect), 0, BLKSIZE);
+    }
+    *ppdiskbno = (uint32_t *)diskaddr(f->f_indirect) + filebno - NDIRECT;
+    return 0;
+}
+
+// Set *blk to the address in memory where the filebno'th
+// block of file 'f' would be mapped.
+//
+// Returns 0 on success, < 0 on error.  Errors are:
+//	-E_NO_DISK if a block needed to be allocated but the disk is full.
+//	-E_INVAL if filebno is out of range.
+//
+// Hint: Use file_block_walk and alloc_block.
+int
+file_get_block(struct File *f, uint32_t filebno, char **blk)
+{
+    // LAB 5: Your code here.
+    uint32_t *pdiskbno;
+    int r = file_block_walk(f, filebno, &pdiskbno, 1);
+    if (r < 0) {
+        return r;
+    }
+    if (*pdiskbno == 0) {
+        int r = alloc_block();
+        if (r < 0) {
+            return -E_NO_DISK;
+        }
+        *pdiskbno = r;
+        memset(diskaddr(*pdiskbno), 0, BLKSIZE);
+    }
+    *blk = diskaddr(*pdiskbno);
+    return 0;
+}
+
+
+// Read count bytes from f into buf, starting from seek position
+// offset.  This meant to mimic the standard pread function.
+// Returns the number of bytes read, < 0 on error.
+ssize_t
+file_read(struct File *f, void *buf, size_t count, off_t offset)
+{
+	int r, bn;
+	off_t pos;
+	char *blk;
+
+	if (offset >= f->f_size)
+		return 0;
+
+	count = MIN(count, f->f_size - offset);
+
+	for (pos = offset; pos < offset + count; ) {
+		if ((r = file_get_block(f, pos / BLKSIZE, &blk)) < 0)
+			return r;
+		bn = MIN(BLKSIZE - pos % BLKSIZE, offset + count - pos);
+		memmove(buf, blk + pos % BLKSIZE, bn);
+		pos += bn;
+		buf += bn;
+	}
+
+	return count;
+}
+
+
+// Write count bytes from buf into f, starting at seek position
+// offset.  This is meant to mimic the standard pwrite function.
+// Extends the file if necessary.
+// Returns the number of bytes written, < 0 on error.
+int
+file_write(struct File *f, const void *buf, size_t count, off_t offset)
+{
+	int r, bn;
+	off_t pos;
+	char *blk;
+
+	// Extend file if necessary
+	if (offset + count > f->f_size)
+		if ((r = file_set_size(f, offset + count)) < 0)
+			return r;
+
+	for (pos = offset; pos < offset + count; ) {
+		if ((r = file_get_block(f, pos / BLKSIZE, &blk)) < 0)
+			return r;
+		bn = MIN(BLKSIZE - pos % BLKSIZE, offset + count - pos);
+		memmove(blk + pos % BLKSIZE, buf, bn);
+		pos += bn;
+		buf += bn;
+	}
+
+	return count;
+}
+```
+
+## The file system interface
+
+Now that we have the necessary functionality within the file system environment itself, we must make it accessible to other environments that wish to use the file system. Since other environments can't directly call functions in the file system environment, we'll expose access to the file system environment via a *remote procedure call*, or RPC, abstraction, built atop JOS's IPC mechanism. Graphically, here's what a call to the file system server (say, read) looks like
+
+```
+       Regular env           FS env
+   +---------------+   +---------------+
+   |      read     |   |   file_read   |
+   |   (lib/fd.c)  |   |   (fs/fs.c)   |
+...|.......|.......|...|.......^.......|...............
+   |       v       |   |       |       | RPC mechanism
+   |  devfile_read |   |  serve_read   |
+   |  (lib/file.c) |   |  (fs/serv.c)  |
+   |       |       |   |       ^       |
+   |       v       |   |       |       |
+   |     fsipc     |   |     serve     |
+   |  (lib/file.c) |   |  (fs/serv.c)  |
+   |       |       |   |       ^       |
+   |       v       |   |       |       |
+   |   ipc_send    |   |   ipc_recv    |
+   |       |       |   |       ^       |
+   +-------|-------+   +-------|-------+
+           |                   |
+           +-------------------+
+```
+
+Everything below the dotted line is simply the mechanics of getting a read request from the regular environment to the file system environment. Starting at the beginning, `read` (which we provide) works on any file descriptor and simply dispatches to the appropriate device read function, in this case `devfile_read` (we can have more device types, like pipes). `devfile_read` implements `read` specifically for on-disk files. This and the other `devfile_*` functions in `lib/file.c` implement the client side of the FS operations and all work in roughly the same way, bundling up arguments in a request structure, calling `fsipc` to send the IPC request, and unpacking and returning the results. The `fsipc` function simply handles the common details of sending a request to the server and receiving the reply.
+
+The file system server code can be found in `fs/serv.c`. It loops in the `serve` function, endlessly receiving a request over IPC, dispatching that request to the appropriate handler function, and sending the result back via IPC. In the read example, `serve` will dispatch to `serve_read`, which will take care of the IPC details specific to read requests such as unpacking the request structure and finally call `file_read` to actually perform the file read.
+
+Recall that JOS's IPC mechanism lets an environment send a single 32-bit number and, optionally, share a page. To send a request from the client to the server, we use the 32-bit number for the request type (the file system server RPCs are numbered, just like how syscalls were numbered) and store the arguments to the request in a `union Fsipc` on the page shared via the IPC. On the client side, we always share the page at `fsipcbuf`; on the server side, we map the incoming request page at `fsreq` (`0x0ffff000`).
+
+The server also sends the response back via IPC. We use the 32-bit number for the function's return code. For most RPCs, this is all they return. `FSREQ_READ` and `FSREQ_STAT` also return data, which they simply write to the page that the client sent its request on. There's no need to send this page in the response IPC, since the client shared it with the file system server in the first place. Also, in its response, `FSREQ_OPEN` shares with the client a new "Fd page". We'll return to the file descriptor page shortly.
+
+## Sharing library state across fork and spawn
+
+The UNIX file descriptors are a general notion that also encompasses pipes, console I/O, etc. In JOS, each of these device types has a corresponding `struct Dev`, with pointers to the functions that implement read/write/etc. for that device type. `lib/fd.c` implements the general UNIX-like file descriptor interface on top of this. Each `struct Fd` indicates its device type, and most of the functions in `lib/fd.c` simply dispatch operations to functions in the appropriate `struct Dev`.
+
+`lib/fd.c` also maintains the *file descriptor table* region in each application environment's address space, starting at `FDTABLE`. This area reserves a page's worth (4KB) of address space for each of the up to `MAXFD` (currently 32) file descriptors the application can have open at once. At any given time, a particular file descriptor table page is mapped if and only if the corresponding file descriptor is in use. Each file descriptor also has an optional "data page" in the region starting at `FILEDATA`, which devices can use if they choose.
+
+We would like to share file descriptor state across `fork` and `spawn`, but file descriptor state is kept in user-space memory. Right now, on `fork`, the memory will be marked copy-on-write, so the state will be duplicated rather than shared. (This means environments won't be able to seek in files they didn't open themselves and that pipes won't work across a fork.) On `spawn`, the memory will be left behind, not copied at all. (Effectively, the spawned environment starts with no open file descriptors.)
+
+We will change `fork` to know that certain regions of memory are used by the "library operating system" and should always be shared. Rather than hard-code a list of regions somewhere, we will set an otherwise-unused bit in the page table entries (just like we did with the `PTE_COW` bit in `fork`).
+
+We have defined a new `PTE_SHARE` bit in `inc/lib.h`. This bit is one of the three PTE bits that are marked "available for software use" in the Intel and AMD manuals. We will establish the convention that if a page table entry has this bit set, the PTE should be copied directly from parent to child in both `fork` and `spawn`. Note that this is different from marking it copy-on-write: as described in the first paragraph, we want to make sure to *share* updates to the page.
+
+
+
+
+
+
+
 # Network
 
 ## Network Server

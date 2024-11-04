@@ -1,9 +1,465 @@
 # JOS
 
+[toc]
+
+# PC Bootstrap
+
+## Several Questions
+
+- What's the first command executed when a PC boot up?
+- What does BIOS do?
+- What does the boot loader do?
+- Why do we need to switch from real mode to protected mode?
+- What's the process of the boot up?
+- What's ELF format? What's .text, .rodat, .data, and .bss? What's the entry point of a program?
+- How to resolve the disparity between the kernel's link address and its load address?
+- How does traceback work?
+
+## Physical Address Space
+
+We will now dive into a bit more detail about how a PC starts up. A PC's physical address space is hard-wired to have the following general layout:
+
+```
+
++------------------+  <- 0xFFFFFFFF (4GB)
+|      32-bit      |
+|  memory mapped   |
+|     devices      |
+|                  |
+/\/\/\/\/\/\/\/\/\/\
+
+/\/\/\/\/\/\/\/\/\/\
+|                  |
+|      Unused      |
+|                  |
++------------------+  <- depends on amount of RAM
+|                  |
+|                  |
+| Extended Memory  |
+|                  |
+|                  |
++------------------+  <- 0x00100000 (1MB)
+|     BIOS ROM     |
++------------------+  <- 0x000F0000 (960KB)
+|  16-bit devices, |
+|  expansion ROMs  |
++------------------+  <- 0x000C0000 (768KB)
+|   VGA Display    |
++------------------+  <- 0x000A0000 (640KB)
+|                  |
+|    Low Memory    |
+|                  |
++------------------+  <- 0x00000000
+
+```
+
+The first PCs, which were based on the 16-bit Intel 8088 processor, were only capable of addressing 1MB of physical memory. The physical address space of an early PC would therefore start at 0x00000000 but end at 0x000FFFFF instead of 0xFFFFFFFF. The 640KB area marked "Low Memory" was the *only* random-access memory (RAM) that an early PC could use; in fact the very earliest PCs only could be configured with 16KB, 32KB, or 64KB of RAM!
+
+The 384KB area from 0x000A0000 through 0x000FFFFF was reserved by the hardware for special uses such as video display buffers and firmware held in non-volatile memory. The most important part of this reserved area is the Basic Input/Output System (BIOS), which occupies the 64KB region from 0x000F0000 through 0x000FFFFF. In early PCs the BIOS was held in true read-only memory (ROM), but current PCs store the BIOS in updateable flash memory. The BIOS is responsible for performing basic system initialization such as activating the video card and checking the amount of memory installed. After performing this initialization, the BIOS loads the operating system from some appropriate location such as floppy disk, hard disk, CD-ROM, or the network, and passes control of the machine to the operating system.
+
+When Intel finally "broke the one megabyte barrier" with the 80286 and 80386 processors, which supported 16MB and 4GB physical address spaces respectively, the PC architects nevertheless preserved the original layout for the low 1MB of physical address space in order to ensure backward compatibility with existing software. Modern PCs therefore have a "hole" in physical memory from 0x000A0000 to 0x00100000, dividing RAM into "low" or "conventional memory" (the first 640KB) and "extended memory" (everything else). In addition, some space at the very top of the PC's 32-bit physical address space, above all physical RAM, is now commonly reserved by the BIOS for use by 32-bit PCI devices.
+
+Recent x86 processors can support *more* than 4GB of physical RAM, so RAM can extend further above 0xFFFFFFFF. In this case the BIOS must arrange to leave a *second* hole in the system's RAM at the top of the 32-bit addressable region, to leave room for these 32-bit devices to be mapped. Because of design limitations JOS will use only the first 256MB of a PC's physical memory anyway, so for now we will pretend that all PCs have "only" a 32-bit physical address space. But dealing with complicated physical address spaces and other aspects of hardware organization that evolved over many years is one of the important practical challenges of OS development.
+
+## BIOS
+
+is GDB's disassembly of the first instruction to be executed. From this output you can conclude a few things:
+
+- The IBM PC starts executing at physical address 0x000ffff0, which is at the very top of the 64KB area reserved for the ROM BIOS.
+- The PC starts executing with `CS = 0xf000` and `IP = 0xfff0`.
+- The first instruction to be executed is a `jmp` instruction, which jumps to the segmented address `CS = 0xf000` and `IP = 0xe05b`.
+
+Why does QEMU start like this? This is how Intel designed the 8088 processor, which IBM used in their original PC. Because the BIOS in a PC is "hard-wired" to the physical address range 0x000f0000-0x000fffff, this design ensures that the BIOS always gets control of the machine first after power-up or any system restart - which is crucial because on power-up there *is* no other software anywhere in the machine's RAM that the processor could execute. The QEMU emulator comes with its own BIOS, which it places at this location in the processor's simulated physical address space. On processor reset, the (simulated) processor enters real mode and sets CS to 0xf000 and the IP to 0xfff0, so that execution begins at that (CS:IP) segment address. How does the segmented address 0xf000:fff0 turn into a physical address?
+
+To answer that we need to know a bit about real mode addressing. In real mode (the mode that PC starts off in), address translation works according to the formula: *physical address* = 16 * *segment* + *offset*. So, when the PC sets CS to 0xf000 and IP to 0xfff0, the physical address referenced is:
+
+```
+   16 * 0xf000 + 0xfff0   # in hex multiplication by 16 is
+   = 0xf0000 + 0xfff0     # easy--just append a 0.
+   = 0xffff0 
+```
+
+`0xffff0` is 16 bytes before the end of the BIOS (`0x100000`). Therefore we shouldn't be surprised that the first thing that the BIOS does is `jmp` backwards to an earlier location in the BIOS; after all how much could it accomplish in just 16 bytes?
+
+## Boot Loader
+
+Floppy and hard disks for PCs are divided into 512 byte regions called *sectors*. A sector is the disk's minimum transfer granularity: each read or write operation must be one or more sectors in size and aligned on a sector boundary. If the disk is bootable, the first sector is called the *boot sector*, since this is where the boot loader code resides. When the BIOS finds a bootable floppy or hard disk, it loads the 512-byte boot sector into memory at physical addresses 0x7c00 through 0x7dff, and then uses a `jmp` instruction to set the CS:IP to `0000:7c00`, passing control to the boot loader. Like the BIOS load address, these addresses are fairly arbitrary - but they are fixed and standardized for PCs.
+
+The ability to boot from a CD-ROM came much later during the evolution of the PC, and as a result the PC architects took the opportunity to rethink the boot process slightly. As a result, the way a modern BIOS boots from a CD-ROM is a bit more complicated (and more powerful). CD-ROMs use a sector size of 2048 bytes instead of 512, and the BIOS can load a much larger boot image from the disk into memory (not just one sector) before transferring control to it. For more information, see the ["El Torito" Bootable CD-ROM Format Specification](https://pdos.csail.mit.edu/6.828/2018/readings/boot-cdrom.pdf).
+
+For 6.828, however, we will use the conventional hard drive boot mechanism, which means that our boot loader must fit into a measly 512 bytes. The boot loader consists of one assembly language source file, `boot/boot.S`, and one C source file, `boot/main.c` Look through these source files carefully and make sure you understand what's going on. The boot loader must perform two main functions:
+
+1. First, the boot loader switches the processor from real mode to *32-bit protected mode*, because it is only in this mode that software can access all the memory above 1MB in the processor's physical address space. Protected mode is described briefly in sections 1.2.7 and 1.2.8 of [PC Assembly Language](https://pdos.csail.mit.edu/6.828/2018/readings/pcasm-book.pdf), and in great detail in the Intel architecture manuals. At this point you only have to understand that translation of segmented addresses (segment:offset pairs) into physical addresses happens differently in protected mode, and that after the transition offsets are 32 bits instead of 16.
+2. Second, the boot loader reads the kernel from the hard disk by directly accessing the IDE disk device registers via the x86's special I/O instructions. If you would like to understand better what the particular I/O instructions here mean, check out the "IDE hard drive controller" section on [the 6.828 reference page](https://pdos.csail.mit.edu/6.828/2018/reference.html). You will not need to learn much about programming specific devices in this class: writing device drivers is in practice a very important part of OS development, but from a conceptual or architectural viewpoint it is also one of the least interesting.
+
+[./boot/boot.S](./boot/boot.S)
+
+```assembly
+#include <inc/mmu.h>
+
+# Start the CPU: switch to 32-bit protected mode, jump into C.
+# The BIOS loads this code from the first sector of the hard disk into
+# memory at physical address 0x7c00 and starts executing in real mode
+# with %cs=0 %ip=7c00.
+
+.set PROT_MODE_CSEG, 0x8         # kernel code segment selector
+.set PROT_MODE_DSEG, 0x10        # kernel data segment selector
+.set CR0_PE_ON,      0x1         # protected mode enable flag
+
+.globl start
+start:
+  .code16                     # Assemble for 16-bit mode
+  cli                         # Disable interrupts
+  cld                         # String operations increment
+
+  # Set up the important data segment registers (DS, ES, SS).
+  xorw    %ax,%ax             # Segment number zero
+  movw    %ax,%ds             # -> Data Segment
+  movw    %ax,%es             # -> Extra Segment
+  movw    %ax,%ss             # -> Stack Segment
+
+  # Enable A20:
+  #   For backwards compatibility with the earliest PCs, physical
+  #   address line 20 is tied low, so that addresses higher than
+  #   1MB wrap around to zero by default.  This code undoes this.
+seta20.1:
+  inb     $0x64,%al               # Wait for not busy
+  testb   $0x2,%al
+  jnz     seta20.1
+
+  movb    $0xd1,%al               # 0xd1 -> port 0x64
+  outb    %al,$0x64
+
+seta20.2:
+  inb     $0x64,%al               # Wait for not busy
+  testb   $0x2,%al
+  jnz     seta20.2
+
+  movb    $0xdf,%al               # 0xdf -> port 0x60
+  outb    %al,$0x60
+
+  # Switch from real to protected mode, using a bootstrap GDT
+  # and segment translation that makes virtual addresses 
+  # identical to their physical addresses, so that the 
+  # effective memory map does not change during the switch.
+  lgdt    gdtdesc
+  movl    %cr0, %eax
+  orl     $CR0_PE_ON, %eax
+  movl    %eax, %cr0
+  
+  # Jump to next instruction, but in 32-bit code segment.
+  # Switches processor into 32-bit mode.
+  ljmp    $PROT_MODE_CSEG, $protcseg
+
+  .code32                     # Assemble for 32-bit mode
+protcseg:
+  # Set up the protected-mode data segment registers
+  movw    $PROT_MODE_DSEG, %ax    # Our data segment selector
+  movw    %ax, %ds                # -> DS: Data Segment
+  movw    %ax, %es                # -> ES: Extra Segment
+  movw    %ax, %fs                # -> FS
+  movw    %ax, %gs                # -> GS
+  movw    %ax, %ss                # -> SS: Stack Segment
+  
+  # Set up the stack pointer and call into C.
+  movl    $start, %esp
+  call bootmain
+
+  # If bootmain returns (it shouldn't), loop.
+spin:
+  jmp spin
+
+# Bootstrap GDT
+.p2align 2                                # force 4 byte alignment
+gdt:
+  SEG_NULL           # null seg
+  SEG(STA_X|STA_R, 0x0, 0xffffffff) # code seg
+  SEG(STA_W, 0x0, 0xffffffff)           # data seg
+
+gdtdesc:
+  .word   0x17                            # sizeof(gdt) - 1
+  .long   gdt                             # address gdt
+```
+
+[kern/entry.S](kern/entry.S)
+
+```assembly
+/* See COPYRIGHT for copyright information. */
+
+#include <inc/mmu.h>
+#include <inc/memlayout.h>
+#include <inc/trap.h>
+
+# Shift Right Logical 
+#define SRL(val, shamt)    (((val) >> (shamt)) & ~(-1 << (32 - (shamt))))
+
+
+###################################################################
+# The kernel (this code) is linked at address ~(KERNBASE + 1 Meg), 
+# but the bootloader loads it at address ~1 Meg.
+#   
+# RELOC(x) maps a symbol x from its link address to its actual
+# location in physical memory (its load address).    
+###################################################################
+
+#define RELOC(x) ((x) - KERNBASE)
+
+#define MULTIBOOT_HEADER_MAGIC (0x1BADB002)
+#define MULTIBOOT_HEADER_FLAGS (0)
+#define CHECKSUM (-(MULTIBOOT_HEADER_MAGIC + MULTIBOOT_HEADER_FLAGS))
+
+###################################################################
+# entry point
+###################################################################
+
+.text
+
+# The Multiboot header
+.align 4
+.long MULTIBOOT_HEADER_MAGIC
+.long MULTIBOOT_HEADER_FLAGS
+.long CHECKSUM
+
+# '_start' specifies the ELF entry point.  Since we haven't set up
+# virtual memory when the bootloader enters this code, we need the
+# bootloader to jump to the *physical* address of the entry point.
+.globl     _start
+_start = RELOC(entry)
+
+.globl entry
+entry:
+    movw   $0x1234,0x472        # warm boot
+
+    # We haven't set up virtual memory yet, so we're running from
+    # the physical address the boot loader loaded the kernel at: 1MB
+    # (plus a few bytes).  However, the C code is linked to run at
+    # KERNBASE+1MB.  Hence, we set up a trivial page directory that
+    # translates virtual addresses [KERNBASE, KERNBASE+4MB) to
+    # physical addresses [0, 4MB).  This 4MB region will be
+    # sufficient until we set up our real page table in mem_init
+    # in lab 2.
+
+    # Load the physical address of entry_pgdir into cr3.  entry_pgdir
+    # is defined in entrypgdir.c.
+    movl   $(RELOC(entry_pgdir)), %eax
+    movl   %eax, %cr3
+    # Turn on paging.
+    movl   %cr0, %eax
+    orl    $(CR0_PE|CR0_PG|CR0_WP), %eax
+    movl   %eax, %cr0
+
+    # Now paging is enabled, but we're still running at a low EIP
+    # (why is this okay?).  Jump up above KERNBASE before entering
+    # C code.
+    mov    $relocated, %eax
+    jmp    *%eax
+relocated:
+
+    # Clear the frame pointer register (EBP)
+    # so that once we get into debugging C code,
+    # stack backtraces will be terminated properly.
+    movl   $0x0,%ebp        # nuke frame pointer
+
+    # Set the stack pointer
+    movl   $(bootstacktop),%esp
+
+    # now to C code
+    call   i386_init
+
+    # Should never get here, but in case we do, just spin.
+spin:   jmp    spin
+
+
+.data
+###################################################################
+# boot stack
+###################################################################
+    .p2align   PGSHIFT       # force page alignment
+    .globl    bootstack
+bootstack:
+    .space    KSTKSIZE
+    .globl    bootstacktop   
+bootstacktop:
+```
+
+[boot/main.c](boot/main.c)
+
+```c
+/**********************************************************************
+ * This a dirt simple boot loader, whose sole job is to boot
+ * an ELF kernel image from the first IDE hard disk.
+ *
+ * DISK LAYOUT
+ *  * This program(boot.S and main.c) is the bootloader.  It should
+ *    be stored in the first sector of the disk.
+ *
+ *  * The 2nd sector onward holds the kernel image.
+ *
+ *  * The kernel image must be in ELF format.
+ *
+ * BOOT UP STEPS
+ *  * when the CPU boots it loads the BIOS into memory and executes it
+ *
+ *  * the BIOS intializes devices, sets of the interrupt routines, and
+ *    reads the first sector of the boot device(e.g., hard-drive)
+ *    into memory and jumps to it.
+ *
+ *  * Assuming this boot loader is stored in the first sector of the
+ *    hard-drive, this code takes over...
+ *
+ *  * control starts in boot.S -- which sets up protected mode,
+ *    and a stack so C code then run, then calls bootmain()
+ *
+ *  * bootmain() in this file takes over, reads in the kernel and jumps to it.
+ **********************************************************************/
+
+#define SECTSIZE    512
+#define ELFHDR     ((struct Elf *) 0x10000) // scratch space
+
+void readsect(void*, uint32_t);
+void readseg(uint32_t, uint32_t, uint32_t);
+
+void
+bootmain(void)
+{
+    struct Proghdr *ph, *eph;
+    int i;
+
+    // read 1st page off disk
+    readseg((uint32_t) ELFHDR, SECTSIZE*8, 0);
+
+    // is this a valid ELF?
+    if (ELFHDR->e_magic != ELF_MAGIC)
+       goto bad;
+
+    // load each program segment (ignores ph flags)
+    ph = (struct Proghdr *) ((uint8_t *) ELFHDR + ELFHDR->e_phoff);
+    eph = ph + ELFHDR->e_phnum;
+    for (; ph < eph; ph++) {
+       // p_pa is the load address of this segment (as well
+       // as the physical address)
+       readseg(ph->p_pa, ph->p_memsz, ph->p_offset);
+       for (i = 0; i < ph->p_memsz - ph->p_filesz; i++) {
+          *((char *) ph->p_pa + ph->p_filesz + i) = 0;
+       }
+    }
+
+    // call the entry point from the ELF header
+    // note: does not return!
+    ((void (*)(void)) (ELFHDR->e_entry))();
+
+bad:
+    outw(0x8A00, 0x8A00);
+    outw(0x8A00, 0x8E00);
+    while (1)
+       /* do nothing */;
+}
+```
+
+## ELF
+
+To make sense out of `boot/main.c` you'll need to know what an ELF binary is. When you compile and link a C program such as the JOS kernel, the compiler transforms each C source ('`.c`') file into an *object* ('`.o`') file containing assembly language instructions encoded in the binary format expected by the hardware. The linker then combines all of the compiled object files into a single *binary image* such as `obj/kern/kernel`, which in this case is a binary in the ELF format, which stands for "Executable and Linkable Format".
+
+Full information about this format is available in [the ELF specification](https://pdos.csail.mit.edu/6.828/2018/readings/elf.pdf) on [our reference page](https://pdos.csail.mit.edu/6.828/2018/reference.html), but you will not need to delve very deeply into the details of this format in this class. Although as a whole the format is quite powerful and complex, most of the complex parts are for supporting dynamic loading of shared libraries, which we will not do in this class. The [Wikipedia page](http://en.wikipedia.org/wiki/Executable_and_Linkable_Format) has a short description.
+
+For purposes of 6.828, you can consider an ELF executable to be a header with loading information, followed by several *program sections*, each of which is a contiguous chunk of code or data intended to be loaded into memory at a specified address. The boot loader does not modify the code or data; it loads it into memory and starts executing it.
+
+An ELF binary starts with a fixed-length *ELF header*, followed by a variable-length *program header* listing each of the program sections to be loaded. The C definitions for these ELF headers are in `inc/elf.h`. The program sections we're interested in are:
+
+- `.text`: The program's executable instructions.
+- `.rodata`: Read-only data, such as ASCII string constants produced by the C compiler. (We will not bother setting up the hardware to prohibit writing, however.)
+- `.data`: The data section holds the program's initialized data, such as global variables declared with initializers like `int x = 5;`.
+
+When the linker computes the memory layout of a program, it reserves space for *uninitialized* global variables, such as `int x;`, in a section called `.bss` that immediately follows `.data` in memory. C requires that "uninitialized" global variables start with a value of zero. Thus there is no need to store contents for `.bss` in the ELF binary; instead, the linker records just the address and size of the `.bss` section. The loader or the program itself must arrange to zero the `.bss` section.
+
+The link address of a section is the memory address from which the section expects to execute. The linker encodes the link address in the binary in various ways, such as when the code needs the address of a global variable, with the result that a binary usually won't work if it is executing from an address that it is not linked for. (It is possible to generate *position-independent* code that does not contain any such absolute addresses. This is used extensively by modern shared libraries, but it has performance and complexity costs, so we won't be using it in 6.828.)
+
+The program headers are then listed under "Program Headers" in the output of objdump. The areas of the ELF object that need to be loaded into memory are those that are marked as "LOAD". Other information for each program header is given, such as the virtual address ("vaddr"), the physical address ("paddr"), and the size of the loaded area ("memsz" and "filesz").
+
+Back in boot/main.c, the `ph->p_pa` field of each program header contains the segment's destination physical address (in this case, it really is a physical address, though the ELF specification is vague on the actual meaning of this field).
+
+The BIOS loads the boot sector into memory starting at address 0x7c00, so this is the boot sector's load address. This is also where the boot sector executes from, so this is also its link address. We set the link address by passing `-Ttext 0x7C00` to the linker in `boot/Makefrag`, so the linker will produce the correct memory addresses in the generated code.
+
+## Position Dependence
+
+When you inspected the boot loader's link and load addresses above, they matched perfectly, but there was a (rather large) disparity between the *kernel's* link address (as printed by objdump) and its load address. Go back and check both and make sure you can see what we're talking about. (Linking the kernel is more complicated than the boot loader, so the link and load addresses are at the top of `kern/kernel.ld`.)
+
+Operating system kernels often like to be linked and run at very high *virtual address*, such as 0xf0100000, in order to leave the lower part of the processor's virtual address space for user programs to use. The reason for this arrangement will become clearer in the next lab.
+
+Many machines don't have any physical memory at address 0xf0100000, so we can't count on being able to store the kernel there. Instead, we will use the processor's memory management hardware to map virtual address 0xf0100000 (the link address at which the kernel code *expects* to run) to physical address 0x00100000 (where the boot loader loaded the kernel into physical memory). This way, although the kernel's virtual address is high enough to leave plenty of address space for user processes, it will be loaded in physical memory at the 1MB point in the PC's RAM, just above the BIOS ROM. This approach requires that the PC have at least a few megabytes of physical memory (so that physical address 0x00100000 works), but this is likely to be true of any PC built after about 1990.
+
+In fact, in the next lab, we will map the *entire* bottom 256MB of the PC's physical address space, from physical addresses 0x00000000 through 0x0fffffff, to virtual addresses 0xf0000000 through 0xffffffff respectively. You should now see why JOS can only use the first 256MB of physical memory.
+
+For now, we'll just map the first 4MB of physical memory, which will be enough to get us up and running. We do this using the hand-written, statically-initialized page directory and page table in `kern/entrypgdir.c`. For now, you don't have to understand the details of how this works, just the effect that it accomplishes. Up until `kern/entry.S` sets the `CR0_PG` flag, memory references are treated as physical addresses (strictly speaking, they're linear addresses, but boot/boot.S set up an identity mapping from linear addresses to physical addresses and we're never going to change that). Once `CR0_PG` is set, memory references are virtual addresses that get translated by the virtual memory hardware to physical addresses. `entry_pgdir` translates virtual addresses in the range 0xf0000000 through 0xf0400000 to physical addresses 0x00000000 through 0x00400000, as well as virtual addresses 0x00000000 through 0x00400000 to physical addresses 0x00000000 through 0x00400000. Any virtual address that is not in one of these two ranges will cause a hardware exception which, since we haven't set up interrupt handling yet, will cause QEMU to dump the machine state and exit (or endlessly reboot if you aren't using the 6.828-patched version of QEMU).
+
+## Stack and Traceback
+
+The x86 stack pointer (`esp` register) points to the lowest location on the stack that is currently in use. Everything *below* that location in the region reserved for the stack is free. Pushing a value onto the stack involves decreasing the stack pointer and then writing the value to the place the stack pointer points to. Popping a value from the stack involves reading the value the stack pointer points to and then increasing the stack pointer. In 32-bit mode, the stack can only hold 32-bit values, and esp is always divisible by four. Various x86 instructions, such as `call`, are "hard-wired" to use the stack pointer register.
+
+The `ebp` (base pointer) register, in contrast, is associated with the stack primarily by software convention. On entry to a C function, the function's *prologue* code normally saves the previous function's base pointer by pushing it onto the stack, and then copies the current `esp` value into `ebp` for the duration of the function. If all the functions in a program obey this convention, then at any given point during the program's execution, it is possible to trace back through the stack by following the chain of saved `ebp` pointers and determining exactly what nested sequence of function calls caused this particular point in the program to be reached. This capability can be particularly useful, for example, when a particular function causes an `assert` failure or `panic` because bad arguments were passed to it, but you aren't sure *who* passed the bad arguments. A stack backtrace lets you find the offending function.
+
+The stack structure is like this:
+
+```
+              4               0
+              +---------------+ HIGH
+              | saved %ebp    | <---+
+              | saved %esi    |     |
+stack frame 0 | arg 4 (%ebx)  |     |
+              | arg 3         |     |
+              | arg 2         |     |
+              | arg 1 (%esi)? |     |
+              | arg 0 (%eax)  |     |
+              | saved %eip    |     |
+              +---------------+     |
+    %ebp ---> | saved %ebp    | <---+
+              | saved %esi    |     |
+stack frame x | arg 4 (%ebx)  |     |
+              | arg 3         |     |
+              | arg 2         |     |
+              | arg 1 (%esi)? |     |
+              | arg 0 (%eax)  |     |
+              | saved %eip    |     |
+              +---------------+     |
+    %ebp ---> | saved %ebp    | ----+
+              | something     |
+    %esp ---> +---------------+ LOW
+
+```
+
+In `kern/kern.ld`, we can find that `__STAB_*` points to the `.stab` section of the elf file which contains the debugging information, as known as the symbol table. It was linked to the kernel and loaded to the kernel memory. The output of `objdump -h obj/kern/kernel` command shows that the kernel does contain a `.stab` and a `.stabstr` section
+and `objdump -G obj/kern/kernel` command will print the symbol table out. So `debuginfo_eip()` can read debugging information like function names from the `.stab` section and that's why `__STAB_*` is used.
+
+In `kern/kdebug.c`, we notice that `debuginfo_eip()` uses a `struct Eipdebuginfo` structure to pass the information we want, and the struct was defined in `kern/kdebug.c` like that.
+
+```
+// Debug information about a particular instruction pointer
+struct Eipdebuginfo {
+	const char *eip_file;		// Source code filename for EIP
+	int eip_line;			// Source code linenumber for EIP
+
+	const char *eip_fn_name;	// Name of function containing EIP
+					//  - Note: not null terminated!
+	int eip_fn_namelen;		// Length of function name
+	uintptr_t eip_fn_addr;		// Address of start of function
+	int eip_fn_narg;		// Number of function arguments
+};
+```
+
+Noticed that `eip_fn_name` is not a null-terminated string, the lab page hinted that we can use `printf("%.*s", length, string)` to print non-null-terminated strings.
+
+
+
+
+
+# Memory Management
+
 ## Physical Memory Management
+
 Physical memory is managed by pages. Physical pages are managed by the kernel using the `struct PageInfo` structure.
 The kernel keeps an array of `struct PageInfo` to keep track of all the physical pages.
 The kernel also keeps a linked list of free pages that can be allocated.
+
 ```c
 // These variables are set in mem_init()
 pde_t *kern_pgdir;		// Kernel's initial page directory
@@ -528,7 +984,7 @@ page_remove(pde_t *pgdir, void *va)
 
 
 
-## Process Management
+# Process Management
 In JOS, a process is called an environment. 
 Each environment has its own virtual address space. 
 The kernel provides a mechanism for creating, destroying, and managing environments.
@@ -767,10 +1223,11 @@ struct Trapframe {
 
 
 
+# Reference
 
+https://pdos.csail.mit.edu/6.828/2018/schedule.html
 
-
-
+https://qiita.com/kagurazakakotori/items/b092fc0dbe3c3ec09e8e
 
 
 

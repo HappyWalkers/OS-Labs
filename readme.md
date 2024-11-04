@@ -448,10 +448,6 @@ struct Eipdebuginfo {
 
 Noticed that `eip_fn_name` is not a null-terminated string, the lab page hinted that we can use `printf("%.*s", length, string)` to print non-null-terminated strings.
 
-
-
-
-
 # Memory Management
 
 ## Physical Memory Management
@@ -662,8 +658,26 @@ page_free(struct PageInfo *pp)
 
 
 
-
 ## Virtual Memory Management
+
+In x86 terminology, a *virtual address* consists of a segment selector and an offset within the segment. A *linear address* is what you get after segment translation but before page translation. A *physical address* is what you finally get after both segment and page translation and what ultimately goes out on the hardware bus to your RAM.
+
+```
+
+           Selector  +--------------+         +-----------+
+          ---------->|              |         |           |
+                     | Segmentation |         |  Paging   |
+Software             |              |-------->|           |---------->  RAM
+            Offset   |  Mechanism   |         | Mechanism |
+          ---------->|              |         |           |
+                     +--------------+         +-----------+
+            Virtual                   Linear                Physical
+```
+
+
+
+### Layout
+
 Every process has its own virtual address space.
 The whole virtual address space is divided into kernel space and user space.
 Both of them can be divided into many virtual pages.
@@ -1184,7 +1198,7 @@ env_pop_tf(struct Trapframe *tf)
 }
 ```
 
-## Trap and Interrupt Handling
+### Trap and Interrupt Handling
 
 ```c
 struct PushRegs {
@@ -1219,9 +1233,11 @@ struct Trapframe {
 } __attribute__((packed));
 ```
 
+# Preemptive Multitasking
 
+# File System
 
-
+# Network
 
 # Reference
 

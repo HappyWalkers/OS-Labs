@@ -1049,11 +1049,12 @@ Here's what the `Env` fields are for:
 
 Like a Unix process, a JOS environment couples the concepts of "thread" and "address space". The thread is defined primarily by the saved registers (the `env_tf` field), and the address space is defined by the page directory and page tables pointed to by `env_pgdir`. To run an environment, the kernel must set up the CPU with *both* the saved registers and the appropriate address space.
 
-### Initialization
+## Initialization
 
 The processes are organized in a array so that we can easily find a process by its id.
 They are also linked in a list that contains all the free processes that can be allocated.
 The array and the linked list are initialized in the function `env_init` in the file `kern/env.c`.
+
 ```c
 void
 env_init(void)
@@ -1080,7 +1081,7 @@ A single process can be accessed using its env_id.
 e = &envs[ENVX(envid)];
 ```
 
-### Allocation
+## Allocation
 To create a new process, we need to initialize the fields of the struct `Env`.
 ```c
 int
@@ -1147,7 +1148,7 @@ memcpy(e->env_pgdir, kern_pgdir, PGSIZE);
     e->env_tf.tf_eflags |= FL_IF;
 ```
 
-### Freeing
+## Freeing
 To free a process, we need to free the memory that was allocated for the process and return the process to the free list.
 1. Free the pages, page tables, and the page directory of the process.
 ```c
@@ -1187,7 +1188,7 @@ To free a process, we need to free the memory that was allocated for the process
     env_free_list = e;
 ```
 
-### Running
+## Running
 To run a process, we need to
 1. Set the current process to the process that we want to run.
 ```c
@@ -1231,7 +1232,371 @@ env_pop_tf(struct Trapframe *tf)
 }
 ```
 
-### Trap and Interrupt Handling
+## Trap and Interrupt Handling
+
+### Basics of Protected Control Transfer
+
+Exceptions and interrupts are both "protected control transfers," which cause the processor to switch from user to kernel mode (CPL=0) without giving the user-mode code any opportunity to interfere with the functioning of the kernel or other environments. In Intel's terminology, an *interrupt* is a protected control transfer that is caused by an asynchronous event usually external to the processor, such as notification of external device I/O activity. An *exception*, in contrast, is a protected control transfer caused synchronously by the currently running code, for example due to a divide by zero or an invalid memory access.
+
+In order to ensure that these protected control transfers are actually *protected*, the processor's interrupt/exception mechanism is designed so that the code currently running when the interrupt or exception occurs *does not get to choose arbitrarily where the kernel is entered or how*. Instead, the processor ensures that the kernel can be entered only under carefully controlled conditions. On the x86, two mechanisms work together to provide this protection:
+
+1. **The Interrupt Descriptor Table.** The processor ensures that interrupts and exceptions can only cause the kernel to be entered at a few specific, well-defined entry-points *determined by the kernel itself*, and not by the code running when the interrupt or exception is taken.
+
+   The x86 allows up to 256 different interrupt or exception entry points into the kernel, each with a different *interrupt vector*. A vector is a number between 0 and 255. An interrupt's vector is determined by the source of the interrupt: different devices, error conditions, and application requests to the kernel generate interrupts with different vectors. The CPU uses the vector as an index into the processor's *interrupt descriptor table* (IDT), which the kernel sets up in kernel-private memory, much like the GDT. From the appropriate entry in this table the processor loads:
+
+   - the value to load into the instruction pointer (`EIP`) register, pointing to the kernel code designated to handle that type of exception.
+   - the value to load into the code segment (`CS`) register, which includes in bits 0-1 the privilege level at which the exception handler is to run. (In JOS, all exceptions are handled in kernel mode, privilege level 0.)
+
+2. **The Task State Segment.** The processor needs a place to save the *old* processor state before the interrupt or exception occurred, such as the original values of `EIP` and `CS` before the processor invoked the exception handler, so that the exception handler can later restore that old state and resume the interrupted code from where it left off. But this save area for the old processor state must in turn be protected from unprivileged user-mode code; otherwise buggy or malicious user code could compromise the kernel.
+
+   For this reason, when an x86 processor takes an interrupt or trap that causes a privilege level change from user to kernel mode, it also switches to a stack in the kernel's memory. A structure called the *task state segment* (TSS) specifies the segment selector and address where this stack lives. The processor pushes (on this new stack) `SS`, `ESP`, `EFLAGS`, `CS`, `EIP`, and an optional error code. Then it loads the `CS` and `EIP` from the interrupt descriptor, and sets the `ESP` and `SS` to refer to the new stack.
+
+   Although the TSS is large and can potentially serve a variety of purposes, JOS only uses it to define the kernel stack that the processor should switch to when it transfers from user to kernel mode. Since "kernel mode" in JOS is privilege level 0 on the x86, the processor uses the `ESP0` and `SS0` fields of the TSS to define the kernel stack when entering kernel mode. JOS doesn't use any other TSS fields.
+
+### Types of Exceptions and Interrupts
+
+All of the synchronous exceptions that the x86 processor can generate internally use interrupt vectors between 0 and 31, and therefore map to IDT entries 0-31. For example, a page fault always causes an exception through vector 14. Interrupt vectors greater than 31 are only used by *software interrupts*, which can be generated by the `int` instruction, or asynchronous *hardware interrupts*, caused by external devices when they need attention.
+
+In this section we will extend JOS to handle the internally generated x86 exceptions in vectors 0-31. In the next section we will make JOS handle software interrupt vector 48 (0x30), which JOS (fairly arbitrarily) uses as its system call interrupt vector. In Lab 4 we will extend JOS to handle externally generated hardware interrupts such as the clock interrupt.
+
+### An Example
+
+Let's put these pieces together and trace through an example. Let's say the processor is executing code in a user environment and encounters a divide instruction that attempts to divide by zero.
+
+1. The processor switches to the stack defined by the `SS0` and `ESP0` fields of the TSS, which in JOS will hold the values `GD_KD` and `KSTACKTOP`, respectively.
+
+2. The processor pushes the exception parameters on the kernel stack, starting at address
+
+    
+
+   ```
+   KSTACKTOP
+   ```
+
+   :
+
+   ```
+                        +--------------------+ KSTACKTOP             
+                        | 0x00000 | old SS   |     " - 4
+                        |      old ESP       |     " - 8
+                        |     old EFLAGS     |     " - 12
+                        | 0x00000 | old CS   |     " - 16
+                        |      old EIP       |     " - 20 <---- ESP 
+                        +--------------------+             
+   	
+   ```
+
+3. Because we're handling a divide error, which is interrupt vector 0 on the x86, the processor reads IDT entry 0 and sets `CS:EIP` to point to the handler function described by the entry.
+
+4. The handler function takes control and handles the exception, for example by terminating the user environment.
+
+For certain types of x86 exceptions, in addition to the "standard" five words above, the processor pushes onto the stack another word containing an *error code*. The page fault exception, number 14, is an important example. See the 80386 manual to determine for which exception numbers the processor pushes an error code, and what the error code means in that case. When the processor pushes an error code, the stack would look as follows at the beginning of the exception handler when coming in from user mode:
+
+```
+                     +--------------------+ KSTACKTOP             
+                     | 0x00000 | old SS   |     " - 4
+                     |      old ESP       |     " - 8
+                     |     old EFLAGS     |     " - 12
+                     | 0x00000 | old CS   |     " - 16
+                     |      old EIP       |     " - 20
+                     |     error code     |     " - 24 <---- ESP
+                     +--------------------+             
+	
+```
+
+### Nested Exceptions and Interrupts
+
+The processor can take exceptions and interrupts both from kernel and user mode. It is only when entering the kernel from user mode, however, that the x86 processor automatically switches stacks before pushing its old register state onto the stack and invoking the appropriate exception handler through the IDT. If the processor is *already* in kernel mode when the interrupt or exception occurs (the low 2 bits of the `CS` register are already zero), then the CPU just pushes more values on the same kernel stack. In this way, the kernel can gracefully handle *nested exceptions* caused by code within the kernel itself. This capability is an important tool in implementing protection, as we will see later in the section on system calls.
+
+If the processor is already in kernel mode and takes a nested exception, since it does not need to switch stacks, it does not save the old `SS` or `ESP` registers. For exception types that do not push an error code, the kernel stack therefore looks like the following on entry to the exception handler:
+
+```
+                     +--------------------+ <---- old ESP
+                     |     old EFLAGS     |     " - 4
+                     | 0x00000 | old CS   |     " - 8
+                     |      old EIP       |     " - 12
+                     +--------------------+             
+```
+
+For exception types that push an error code, the processor pushes the error code immediately after the old `EIP`, as before.
+
+There is one important caveat to the processor's nested exception capability. If the processor takes an exception while already in kernel mode, and *cannot push its old state onto the kernel stack* for any reason such as lack of stack space, then there is nothing the processor can do to recover, so it simply resets itself. Needless to say, the kernel should be designed so that this can't happen.
+
+### Setting Up the IDT
+
+You should now have the basic information you need in order to set up the IDT and handle exceptions in JOS. For now, you will set up the IDT to handle interrupt vectors 0-31 (the processor exceptions). We'll handle system call interrupts later in this lab and add interrupts 32-47 (the device IRQs) in a later lab.
+
+The header files `inc/trap.h` and `kern/trap.h` contain important definitions related to interrupts and exceptions that you will need to become familiar with. The file `kern/trap.h` contains definitions that are strictly private to the kernel, while `inc/trap.h` contains definitions that may also be useful to user-level programs and libraries.
+
+Note: Some of the exceptions in the range 0-31 are defined by Intel to be reserved. Since they will never be generated by the processor, it doesn't really matter how you handle them. Do whatever you think is cleanest.
+
+The overall flow of control that you should achieve is depicted below:
+
+```
+      IDT                   trapentry.S         trap.c
+   
++----------------+                        
+|   &handler1    |---------> handler1:          trap (struct Trapframe *tf)
+|                |             // do stuff      {
+|                |             call trap          // handle the exception/interrupt
+|                |             // ...           }
++----------------+
+|   &handler2    |--------> handler2:
+|                |            // do stuff
+|                |            call trap
+|                |            // ...
++----------------+
+       .
+       .
+       .
++----------------+
+|   &handlerX    |--------> handlerX:
+|                |             // do stuff
+|                |             call trap
+|                |             // ...
++----------------+
+```
+
+Each exception or interrupt should have its own handler in `trapentry.S` and `trap_init()` should initialize the IDT with the addresses of these handlers. Each of the handlers should build a `struct Trapframe` (see `inc/trap.h`) on the stack and call `trap()` (in `trap.c`) with a pointer to the Trapframe. `trap()` then handles the exception/interrupt or dispatches to a specific handler function.
+
+User processes ask the kernel to do things for them by invoking system calls. When the user process invokes a system call, the processor enters kernel mode, the processor and the kernel cooperate to save the user process's state, the kernel executes appropriate code in order to carry out the system call, and then resumes the user process. The exact details of how the user process gets the kernel's attention and how it specifies which call it wants to execute vary from system to system.
+
+In the JOS kernel, we will use the `int` instruction, which causes a processor interrupt. In particular, we will use `int $0x30` as the system call interrupt. We have defined the constant `T_SYSCALL` to 48 (0x30) for you. You will have to set up the interrupt descriptor to allow user processes to cause that interrupt. Note that interrupt 0x30 cannot be generated by hardware, so there is no ambiguity caused by allowing user code to generate it.
+
+The application will pass the system call number and the system call arguments in registers. This way, the kernel won't need to grub around in the user environment's stack or instruction stream. The system call number will go in `%eax`, and the arguments (up to five of them) will go in `%edx`, `%ecx`, `%ebx`, `%edi`, and `%esi`, respectively. The kernel passes the return value back in `%eax`. 
+
+[kern/trapentry.S](kern/trapentry.S)
+
+```assembly
+/* See COPYRIGHT for copyright information. */
+
+#include <inc/mmu.h>
+#include <inc/memlayout.h>
+#include <inc/trap.h>
+
+#include <kern/picirq.h>
+
+
+###################################################################
+# exceptions/interrupts
+###################################################################
+
+/* TRAPHANDLER defines a globally-visible function for handling a trap.
+ * It pushes a trap number onto the stack, then jumps to _alltraps.
+ * Use TRAPHANDLER for traps where the CPU automatically pushes an error code.
+ *
+ * You shouldn't call a TRAPHANDLER function from C, but you may
+ * need to _declare_ one in C (for instance, to get a function pointer
+ * during IDT setup).  You can declare the function with
+ *   void NAME();
+ * where NAME is the argument passed to TRAPHANDLER.
+ */
+#define TRAPHANDLER(name, num)						\
+	.globl name;		/* define global symbol for 'name' */	\
+	.type name, @function;	/* symbol type is function */		\
+	.align 2;		/* align function definition */		\
+	name:			/* function starts here */		\
+	pushl $(num);							\
+	jmp _alltraps
+
+/* Use TRAPHANDLER_NOEC for traps where the CPU doesn't push an error code.
+ * It pushes a 0 in place of the error code, so the trap frame has the same
+ * format in either case.
+ */
+#define TRAPHANDLER_NOEC(name, num)					\
+	.globl name;							\
+	.type name, @function;						\
+	.align 2;							\
+	name:								\
+	pushl $0;							\
+	pushl $(num);							\
+	jmp _alltraps
+
+.text
+
+/*
+ * Lab 3: Your code here for generating entry points for the different traps.
+ */
+TRAPHANDLER_NOEC(trap_divide, T_DIVIDE);
+TRAPHANDLER_NOEC(trap_debug, T_DEBUG);
+TRAPHANDLER_NOEC(trap_nmi, T_NMI);
+TRAPHANDLER_NOEC(trap_brkpt, T_BRKPT);
+TRAPHANDLER_NOEC(trap_oflow, T_OFLOW);
+TRAPHANDLER_NOEC(trap_bound, T_BOUND);
+TRAPHANDLER_NOEC(trap_illop, T_ILLOP);
+TRAPHANDLER_NOEC(trap_device, T_DEVICE);
+TRAPHANDLER(trap_dblflt, T_DBLFLT);
+TRAPHANDLER(trap_tss, T_TSS);
+TRAPHANDLER(trap_segnp, T_SEGNP);
+TRAPHANDLER(trap_stack, T_STACK);
+TRAPHANDLER(trap_gpflt, T_GPFLT);
+TRAPHANDLER(trap_pgflt, T_PGFLT);
+TRAPHANDLER_NOEC(trap_fperr, T_FPERR);
+TRAPHANDLER(trap_align, T_ALIGN);
+TRAPHANDLER_NOEC(trap_mchk, T_MCHK);
+TRAPHANDLER_NOEC(trap_simderr, T_SIMDERR);
+
+TRAPHANDLER_NOEC(trap_syscall, T_SYSCALL);
+TRAPHANDLER_NOEC(trap_default, T_DEFAULT);
+
+TRAPHANDLER_NOEC(irq_timer, IRQ_OFFSET + IRQ_TIMER);
+TRAPHANDLER_NOEC(irq_kbd, IRQ_OFFSET + IRQ_KBD);
+TRAPHANDLER_NOEC(irq_serial, IRQ_OFFSET + IRQ_SERIAL);
+TRAPHANDLER_NOEC(irq_spurious, IRQ_OFFSET + IRQ_SPURIOUS);
+TRAPHANDLER_NOEC(irq_ide, IRQ_OFFSET + IRQ_IDE);
+TRAPHANDLER_NOEC(irq_error, IRQ_OFFSET + IRQ_ERROR);
+
+
+/*
+ * Lab 3: Your code here for _alltraps
+ */
+.globl _alltraps
+_alltraps:
+    pushl %ds
+    pushl %es
+    pushal
+
+    movw $GD_KD, %ax
+    movw %ax, %ds
+    movw %ax, %es
+
+    pushl %esp
+    call trap
+    addl $4, %esp
+
+    popal
+    popl %es
+    popl %ds
+    addl $0x8, %esp
+    iret
+```
+
+[kern/trap.c](kern/trap.c)
+
+```c
+static void
+trap_dispatch(struct Trapframe *tf)
+{
+    // Handle processor exceptions.
+    // LAB 3: Your code here.
+    switch (tf->tf_trapno) {
+        case T_BRKPT:
+            monitor(tf);
+            break;
+        case T_PGFLT:
+            page_fault_handler(tf);
+            break;
+        case T_SYSCALL:
+            tf->tf_regs.reg_eax = syscall(tf->tf_regs.reg_eax,
+                                          tf->tf_regs.reg_edx,
+                                          tf->tf_regs.reg_ecx,
+                                          tf->tf_regs.reg_ebx,
+                                          tf->tf_regs.reg_edi,
+                                          tf->tf_regs.reg_esi);
+            return;
+        case IRQ_OFFSET + IRQ_SPURIOUS:
+            // Handle spurious interrupts
+            // The hardware sometimes raises these because of noise on the
+            // IRQ line or other reasons. We don't care.
+            cprintf("Spurious interrupt on irq 7\n");
+            print_trapframe(tf);
+            return;
+        case IRQ_OFFSET + IRQ_TIMER:
+            // Add time tick increment to clock interrupts.
+            // Be careful! In multiprocessors, clock interrupts are
+            // triggered on every CPU.
+            // LAB 6: Your code here.
+            time_tick();
+
+            // Handle clock interrupts. Don't forget to acknowledge the
+            // interrupt using lapic_eoi() before calling the scheduler!
+            // LAB 4: Your code here.
+            lapic_eoi();
+            sched_yield();
+            return;
+        case IRQ_OFFSET + IRQ_KBD:
+            // Handle keyboard and serial interrupts.
+            // LAB 5: Your code here.
+            kbd_intr();
+            return;
+        case IRQ_OFFSET + IRQ_SERIAL:
+            serial_intr();
+            return;
+        default:
+            // Unexpected trap: The user process or the kernel has a bug.
+            cprintf("Unexpected trap %d\n", tf->tf_trapno);
+            print_trapframe(tf);
+            if (tf->tf_cs == GD_KT)
+                panic("unhandled trap in kernel");
+            else {
+                env_destroy(curenv);
+                return;
+            }
+    }
+}
+
+void
+trap(struct Trapframe *tf)
+{
+    // The environment may have set DF and some versions
+    // of GCC rely on DF being clear
+    asm volatile("cld" ::: "cc");
+
+    // Halt the CPU if some other CPU has called panic()
+    extern char *panicstr;
+    if (panicstr)
+       asm volatile("hlt");
+
+    // Re-acqurie the big kernel lock if we were halted in
+    // sched_yield()
+    if (xchg(&thiscpu->cpu_status, CPU_STARTED) == CPU_HALTED)
+       lock_kernel();
+    // Check that interrupts are disabled.  If this assertion
+    // fails, DO NOT be tempted to fix it by inserting a "cli" in
+    // the interrupt path.
+    assert(!(read_eflags() & FL_IF));
+
+    if ((tf->tf_cs & 3) == 3) {
+       // Trapped from user mode.
+       // Acquire the big kernel lock before doing any
+       // serious kernel work.
+       // LAB 4: Your code here.
+        lock_kernel();
+       assert(curenv);
+
+       // Garbage collect if current enviroment is a zombie
+       if (curenv->env_status == ENV_DYING) {
+          env_free(curenv);
+          curenv = NULL;
+          sched_yield();
+       }
+
+       // Copy trap frame (which is currently on the stack)
+       // into 'curenv->env_tf', so that running the environment
+       // will restart at the trap point.
+       curenv->env_tf = *tf;
+       // The trapframe on the stack should be ignored from here on.
+       tf = &curenv->env_tf;
+    }
+
+    // Record that tf is the last real trapframe so
+    // print_trapframe can print some additional information.
+    last_tf = tf;
+
+    // Dispatch based on what type of trap occurred
+    trap_dispatch(tf);
+
+    // If we made it to this point, then no other environment was
+    // scheduled, so we should return to the current environment
+    // if doing so makes sense.
+    if (curenv && curenv->env_status == ENV_RUNNING)
+       env_run(curenv);
+    else
+       sched_yield();
+}
+```
+
+[inc/trap.h](inc/trap.h)
 
 ```c
 struct PushRegs {
@@ -1320,7 +1685,7 @@ Since our file system environment has its own virtual address space independent 
 
 Of course, it would take a long time to read the entire disk into memory, so instead we'll implement a form of *demand paging*, wherein we only allocate pages in the disk map region and read the corresponding block from the disk in response to a page fault in this region. This way, we can pretend that the entire disk is in memory.
 
-## The Block Bitmap
+### The Block Bitmap
 
 After `fs_init` sets the `bitmap` pointer, we can treat `bitmap` as a packed array of bits, one for each block on the disk. See, for example, `block_is_free`, which simply checks whether a given block is marked free in the bitmap.
 
@@ -1347,7 +1712,7 @@ block_is_free(uint32_t blockno)
 
 
 
-## File Operations
+### File Operations
 
 We have provided a variety of functions in `fs/fs.c` to implement the basic facilities you will need to interpret and manage `File` structures, scan and manage the entries of directory-files, and walk the file system from the root to resolve an absolute pathname. Read through *all* of the code in `fs/fs.c` and make sure you understand what each function does before proceeding.
 
@@ -1482,7 +1847,7 @@ file_write(struct File *f, const void *buf, size_t count, off_t offset)
 }
 ```
 
-## The file system interface
+### The file system interface
 
 Now that we have the necessary functionality within the file system environment itself, we must make it accessible to other environments that wish to use the file system. Since other environments can't directly call functions in the file system environment, we'll expose access to the file system environment via a *remote procedure call*, or RPC, abstraction, built atop JOS's IPC mechanism. Graphically, here's what a call to the file system server (say, read) looks like
 
@@ -1516,7 +1881,7 @@ Recall that JOS's IPC mechanism lets an environment send a single 32-bit number 
 
 The server also sends the response back via IPC. We use the 32-bit number for the function's return code. For most RPCs, this is all they return. `FSREQ_READ` and `FSREQ_STAT` also return data, which they simply write to the page that the client sent its request on. There's no need to send this page in the response IPC, since the client shared it with the file system server in the first place. Also, in its response, `FSREQ_OPEN` shares with the client a new "Fd page". We'll return to the file descriptor page shortly.
 
-## Sharing library state across fork and spawn
+### Sharing library state across fork and spawn
 
 The UNIX file descriptors are a general notion that also encompasses pipes, console I/O, etc. In JOS, each of these device types has a corresponding `struct Dev`, with pointers to the functions that implement read/write/etc. for that device type. `lib/fd.c` implements the general UNIX-like file descriptor interface on top of this. Each `struct Fd` indicates its device type, and most of the functions in `lib/fd.c` simply dispatch operations to functions in the appropriate `struct Dev`.
 
